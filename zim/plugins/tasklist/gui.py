@@ -821,6 +821,10 @@ class TaskListTreeView(BrowserTreeView):
 		return text
 
 	def get_visible_data_as_html(self):
+		today = str(datetime.date.today())
+		tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
+		dayafter = str(datetime.date.today() + datetime.timedelta(days=2))
+
 		html = '''\
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
 <html>
@@ -856,13 +860,13 @@ class TaskListTreeView(BrowserTreeView):
 	</head>
 	<body>
 
-<h1>Task List - Zim</h1>
+<h1>Task List - Zim - %s</h1>
 
 <p>
 	Selection
 	<select name="tag" id="tagSelect" oninput="filterByTag()">
 		<option value="">All Tags</option>
-''' % (HIGH_COLOR, MEDIUM_COLOR, ALERT_COLOR)
+''' % (HIGH_COLOR, MEDIUM_COLOR, ALERT_COLOR, today)
 
 		for tag in sorted(self.get_tags()):
 			html += '<option value ="@%s">%s</option>\n' % (tag, tag)
@@ -877,9 +881,7 @@ class TaskListTreeView(BrowserTreeView):
 <tr><th>Prio</th><th>Task</th><th>Date</th><th>Page</th></tr>
 '''
 
-		today = str(datetime.date.today())
-		tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
-		dayafter = str(datetime.date.today() + datetime.timedelta(days=2))
+
 		for indent, prio, desc, date, page in self.get_visible_data():
 			if prio >= 3:
 					prio = '<td class="high">%s</td>' % prio
