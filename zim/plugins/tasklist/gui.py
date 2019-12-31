@@ -323,7 +323,7 @@ class TagListTreeView(SingleClickTreeView):
 
 		model.append(('', 0, self._type_separator, 0)) # separator
 
-		for tag in natural_sorted(tags):
+		for tag in sorted(tags):
 			model.append((tag, tags[tag], self._type_tag, Pango.Weight.NORMAL))
 
 		# Restore selection
@@ -848,6 +848,7 @@ class TaskListTreeView(BrowserTreeView):
 				border-style: solid;
 				border-color: gray;
 			}
+			.date {white-space: nowrap}
 			.high {background-color: %s}
 			.medium {background-color: %s}
 			.alert {background-color: %s}
@@ -857,9 +858,24 @@ class TaskListTreeView(BrowserTreeView):
 
 <h1>Task List - Zim</h1>
 
-<table class="tasklist">
-<tr><th>Prio</th><th>Task</th><th>Date</th><th>Page</th></tr>
+<p>
+	Selection
+	<select name="tag" id="tagSelect" oninput="filterByTag()">
+		<option value="">All Tags</option>
 ''' % (HIGH_COLOR, MEDIUM_COLOR, ALERT_COLOR)
+
+		for tag in sorted(self.get_tags()):
+			html += '<option value ="@%s">%s</option>\n' % (tag, tag)
+
+
+		html += '''\
+		</select>
+	<input type="text" id="textInput" onkeyup="filterByText()" placeholder="Filter...">
+</p>
+
+<table class="tasklist" id="tasktable">
+<tr><th>Prio</th><th>Task</th><th>Date</th><th>Page</th></tr>
+'''
 
 		today = str(datetime.date.today())
 		tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
@@ -875,13 +891,17 @@ class TaskListTreeView(BrowserTreeView):
 					prio = '<td>%s</td>' % prio
 
 			if date and date <= today:
-					date = '<td class="high">%s</td>' % date
+					date = '<td class="date high">%s</td>' % date
 			elif date == tomorrow:
-					date = '<td class="medium">%s</td>' % date
+					date = '<td class="date medium">%s</td>' % date
 			elif date == dayafter:
-					date = '<td class="alert">%s</td>' % date
+					date = '<td class="date alert">%s</td>' % date
 			else:
-					date = '<td>%s</td>' % date
+					date = '<td class="date" >%s</td>' % date
+
+
+
+			desc = desc.replace('<span color="', '<span style="color:')
 
 			desc = '<td>%s%s</td>' % ('&nbsp;' * (4 * indent), desc)
 			page = '<td>%s</td>' % page
@@ -891,7 +911,56 @@ class TaskListTreeView(BrowserTreeView):
 		html += '''\
 </table>
 
+<script>
+		function filterByText() {
+			// Declare variables
+			var input, filter, table, tr, td, i, txtValue;
+			input = document.getElementById("textInput");
+			filter = input.value.toUpperCase();
+			table = document.getElementById("tasktable");
+			tr = table.getElementsByTagName("tr");
+
+			// Loop through all table rows, and hide those who don't match the search query
+			for (i = 0; i < tr.length; i++) {
+				td = tr[i].getElementsByTagName("td")[1];
+				if (td) {
+					txtValue = td.textContent || td.innerText;
+					if (txtValue.toUpperCase().indexOf(filter) > -1) {
+						tr[i].style.display = "";
+					} else {
+						tr[i].style.display = "none";
+					}
+				}
+			}
+		}
+
+		function filterByTag() {
+			// Declare variables
+			var input, filter, table, tr, td, i, txtValue;
+			input = document.getElementById("tagSelect");
+			filter = input.value;
+			console.log(input.value)
+			table = document.getElementById("tasktable");
+			tr = table.getElementsByTagName("tr");
+
+			// Loop through all table rows, and hide those who don't match the search query
+			for (i = 0; i < tr.length; i++) {
+				td = tr[i].getElementsByTagName("td")[1];
+				if (td) {
+					txtValue = td.textContent || td.innerText;
+					if (txtValue.indexOf(filter) > -1) {
+						tr[i].style.display = "";
+					} else {
+						tr[i].style.display = "none";
+					}
+				}
+			}
+		}
+	</script>
+
 	</body>
+
+
 
 </html>
 '''
