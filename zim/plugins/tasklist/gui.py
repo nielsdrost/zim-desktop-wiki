@@ -821,9 +821,8 @@ class TaskListTreeView(BrowserTreeView):
 		return text
 
 	def get_visible_data_as_html(self):
-		today = str(datetime.date.today())
-		tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
-		dayafter = str(datetime.date.today() + datetime.timedelta(days=2))
+		now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
 
 		html = '''\
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
@@ -833,124 +832,127 @@ class TaskListTreeView(BrowserTreeView):
 		<title>Task List - Zim</title>
 		<meta name='Generator' content='Zim [%% zim.version %%]'>
 		<style type='text/css'>
+			.high {color: %s}
+			.medium {color: %s}
+			.alert {color: %s}
+
 			table.tasklist {
-				border-width: 1px;
-				border-spacing: 2px;
-				border-style: solid;
-				border-color: gray;
 				border-collapse: collapse;
+				table-layout: fixed;
+				width: 300px;
+				margin: 0px;
+				border: 0px;
+				padding: 1px;
+
 			}
-			table.tasklist th {
-				border-width: 1px;
+
+			tr.tasklist {
+
+
+			}
+
+			td.prio {
+				width: 22px;
+			}
+
+
+			td.taskdesc {
+				width: 290px;
+				word-wrap:break-word;
+				white-space: normal;
+
+				border: solid;
+  				border-width: 1px 0;
 				padding: 1px;
 				border-style: solid;
-				border-color: gray;
+				border-color: lightgray;
 			}
-			table.tasklist td {
-				border-width: 1px;
-				padding: 1px;
-				border-style: solid;
-				border-color: gray;
+
+			html {
+				margin: 0px;
 			}
-			.date {white-space: nowrap}
-			.high {background-color: %s}
-			.medium {background-color: %s}
-			.alert {background-color: %s}
+
+			body {
+				margin: 2px;
+			}
 		</style>
 	</head>
 	<body>
-
-<h1>Task List - Zim - %s</h1>
-
+<h2>Generated at %s</h2>
 <p>
-	Selection
-	<select name="tag" id="tagSelect" oninput="filterByTag()">
-		<option value="">All Tags</option>
-''' % (HIGH_COLOR, MEDIUM_COLOR, ALERT_COLOR, today)
+<select name="tag" id="tagSelect" oninput="filterItems()">
+	<option value="">All Tags</option>
+''' % (HIGH_COLOR, MEDIUM_COLOR, ALERT_COLOR, now)
+		tags = self.get_tags();
 
 		for tag in sorted(self.get_tags()):
-			html += '<option value ="@%s">%s</option>\n' % (tag, tag)
+			html += '<option value ="@%s">%s (%s)</option>\n' % (tag, tag, tags[tag])
 
 
 		html += '''\
-		</select>
-	<input type="text" id="textInput" onkeyup="filterByText()" placeholder="Filter...">
+</select>
 </p>
+<p><input type="text" id="textInput" onkeyup="filterItems()" placeholder="Filter..."></p>
+<p><input type="checkbox" name="prioInput" id="prioInput" oninput="filterItems()"> Priority items only</p>
 
 <table class="tasklist" id="tasktable">
-<tr><th>Prio</th><th>Task</th><th>Date</th><th>Page</th></tr>
 '''
 
+		today = str(datetime.date.today())
+		tomorrow = str(datetime.date.today() + datetime.timedelta(days=1))
+		dayafter = str(datetime.date.today() + datetime.timedelta(days=2))
 
 		for indent, prio, desc, date, page in self.get_visible_data():
-			if prio >= 3:
-					prio = '<td class="high">%s</td>' % prio
-			elif prio == 2:
-					prio = '<td class="medium">%s</td>' % prio
-			elif prio == 1:
-					prio = '<td class="alert">%s</td>' % prio
+			if prio >= 1:
+				prio = '<td class="prio">&#11088;</td>'
 			else:
-					prio = '<td>%s</td>' % prio
+				prio = '<td class="prio"></td>'
+
 
 			if date and date <= today:
-					date = '<td class="date high">%s</td>' % date
+					date = ' (<span class="high">%s</span>)' % date
 			elif date == tomorrow:
-					date = '<td class="date medium">%s</td>' % date
+					date = ' (<span class="high">%s</span>)' % date
 			elif date == dayafter:
-					date = '<td class="date alert">%s</td>' % date
+					date = ' (<span class="high">%s</span>)' % date
+			elif date:
+					date = ' (%s)' % date
 			else:
-					date = '<td class="date" >%s</td>' % date
+					date = ''
 
 
-
-			desc = desc.replace('<span color="', '<span style="color:')
-
-			desc = '<td>%s%s</td>' % ('&nbsp;' * (4 * indent), desc)
-			page = '<td>%s</td>' % page
-
-			html += '<tr>' + prio + desc + date + page + '</tr>\n'
+			desc = '<td class="taskdesc">' + desc.replace('<span color="', '<span style="color:') + date + '</td>'
+			
+			html += '<tr class="tasklist">%s%s</tr>\n' % (prio, desc)
 
 		html += '''\
 </table>
 
 <script>
-		function filterByText() {
+		function filterItems() {
 			// Declare variables
 			var input, filter, table, tr, td, i, txtValue;
-			input = document.getElementById("textInput");
-			filter = input.value.toUpperCase();
+			textInput = document.getElementById("textInput");
+			tagInput = document.getElementById("tagSelect");
+			prioInput = document.getElementById("prioInput");
+
+			textFilter = textInput.value.toUpperCase();
+			tagFilter = tagInput.value;
+			prioFilter = prioInput.checked;
 			table = document.getElementById("tasktable");
 			tr = table.getElementsByTagName("tr");
 
 			// Loop through all table rows, and hide those who don't match the search query
 			for (i = 0; i < tr.length; i++) {
-				td = tr[i].getElementsByTagName("td")[1];
-				if (td) {
-					txtValue = td.textContent || td.innerText;
-					if (txtValue.toUpperCase().indexOf(filter) > -1) {
-						tr[i].style.display = "";
-					} else {
-						tr[i].style.display = "none";
-					}
+				prio = tr[i].getElementsByTagName("td")[0];
+				if (prio) {
+					prioValue = prio.textContent || prio.innerText
 				}
-			}
-		}
 
-		function filterByTag() {
-			// Declare variables
-			var input, filter, table, tr, td, i, txtValue;
-			input = document.getElementById("tagSelect");
-			filter = input.value;
-			console.log(input.value)
-			table = document.getElementById("tasktable");
-			tr = table.getElementsByTagName("tr");
-
-			// Loop through all table rows, and hide those who don't match the search query
-			for (i = 0; i < tr.length; i++) {
 				td = tr[i].getElementsByTagName("td")[1];
 				if (td) {
 					txtValue = td.textContent || td.innerText;
-					if (txtValue.indexOf(filter) > -1) {
+					if ((txtValue.toUpperCase().indexOf(textFilter) > -1) && (txtValue.indexOf(tagFilter) > -1) && (!prioFilter || prioValue))  {
 						tr[i].style.display = "";
 					} else {
 						tr[i].style.display = "none";

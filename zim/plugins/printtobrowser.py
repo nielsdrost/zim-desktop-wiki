@@ -7,6 +7,7 @@ from gi.repository import Gtk
 
 from functools import partial
 
+import os
 
 from zim.plugins import PluginClass
 from zim.actions import action
@@ -81,8 +82,13 @@ class PrintTaskListDialogExtension(TaskListDialogExtension):
 
 	def on_print_tasklist(self, o):
 		html = self.dialog.task_list.get_visible_data_as_html()
+
+		with open(os.path.expanduser('~/Dropbox/tasks.html'), 'w') as file:
+			file.write(html)
+
 		file = TmpFile('print-to-browser.html', persistent=True, unique=False)
 		file.write(html)
+
 		open_url(self.dialog, 'file://%s' % file) # XXX
 			# Try to force web browser here - otherwise it goes to the
 			# file browser which can have unexpected results
