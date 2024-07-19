@@ -6,7 +6,6 @@ import tests
 import os
 
 from zim.plugins import *
-from zim.fs import File
 
 from tests.mainwindow import setUpMainWindow
 
@@ -24,7 +23,7 @@ class TestPluginClasses(tests.TestCase):
 		self.assertTrue('spell' in plugins)
 		self.assertTrue('linkmap' in plugins)
 
-		pluginindex = File('data/manual/Plugins.txt').read()
+		pluginindex = tests.ZIM_DATA_FOLDER.file('manual/Plugins.txt').read()
 
 		seen = {
 			'name': set(),
@@ -58,19 +57,20 @@ class TestPluginClasses(tests.TestCase):
 			rellink = "+%s" % page[8:]
 			self.assertIn(rellink, pluginindex, 'Missing links "%s" in manual/Plugins.txt' % rellink)
 
-			file = File('data/manual/' + page.replace(':', '/').replace(' ', '_') + '.txt')
+			file = tests.ZIM_DATA_FOLDER.file('manual/' + page.replace(':', '/').replace(' ', '_') + '.txt')
 			self.assertTrue(file.exists(), 'Missing file: %s' % file)
 
 			manual = file.read()
 			ignore = getattr(klass, 'hide_preferences', [])
-			for pref in klass.plugin_preferences:
-				if pref[0] in ignore:
-					continue
+			prefs = [p for p in klass.plugin_preferences if not p[0] in ignore]
+			props = [p for p in klass.plugin_notebook_properties]
+			for pref in prefs + props:
 				label = pref[2]
-				if '\n' in label:
-					label, x = label.split('\n', 1)
-					label = label.rstrip(',')
-				self.assertIn(label, manual, 'Preference "%s" for %s plugin not documented in manual page' % (label, name))
+				if label is not None: # else it is hidden option
+					if '\n' in label:
+						label, x = label.split('\n', 1)
+						label = label.rstrip(',')
+					self.assertTrue(label in manual, 'Preference or property "%s" for %s plugin not documented in manual page' % (label, name))
 
 			# test dependencies data
 			dep = klass.check_dependencies()
@@ -145,7 +145,7 @@ class TestPlugins(tests.TestCase):
 		self.assertGreaterEqual(len(notebook.__zim_extension_objects__), 2)
 			# At least journal and tasklist should load
 
-		mainwindow = setUpMainWindow(notebook, plugins=manager)
+		mainwindow = setUpMainWindow(notebook)
 		self.assertGreaterEqual(len(mainwindow.pageview.__zim_extension_objects__), 3)
 			# enough plugins without dependencies here
 
@@ -153,13 +153,21 @@ class TestPlugins(tests.TestCase):
 			manager[name].preferences.emit('changed')
 				# Checking for exceptions and infinite recursion
 
+		loaded = list(manager)
 		for name in manager:
-			#~ print("REMOVE:", name)
+			# print("REMOVE:", name)
 			self.assertIsInstance(manager[name], PluginClass)
 			manager.remove_plugin(name)
 			self.assertNotIn(name, manager)
 
-		self.assertTrue(len(manager) == 0)
+		self.assertEqual(len(manager), 0)
+
+		for name in sorted(loaded):
+			# print("LOAD AGAIN:", name)
+			manager.load_plugin(name)
+			self.assertIsInstance(manager[name], PluginClass)
+
+		self.assertEqual(len(manager), len(loaded))
 
 
 class TestFunctions(tests.TestCase):

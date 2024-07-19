@@ -12,9 +12,10 @@
 # - add \ before line ends to match line breaks from user
 
 import re
+from zim.parse.encode import escape_string
 
 from zim.formats import *
-from zim.parsing import url_re, escape_string
+from zim.parse.links import old_url_link_re
 from zim.formats.plain import Dumper as TextDumper
 
 
@@ -40,6 +41,7 @@ class Dumper(TextDumper):
 		XCHECKED_BOX: '* \u2612',
 		CHECKED_BOX: '* \u2611',
 		MIGRATED_BOX: '* \u25B7',
+		TRANSMIGRATED_BOX: '* \u25C1',
 		BULLET: '*',
 	}
 
@@ -71,7 +73,7 @@ class Dumper(TextDumper):
 			del attrib['indent']
 		strings = TextDumper.dump_list(self, tag, attrib, strings)
 
-		if self.context[-1].tag in (BULLETLIST, NUMBEREDLIST):
+		if self.context[-1].tag == LISTITEM:
 			# sub-list
 			return strings
 		else:
@@ -83,6 +85,16 @@ class Dumper(TextDumper):
 	dump_ul = dump_list
 	dump_ol = dump_list
 
+	def dump_li(self, tag, attrib, strings):
+		# Markdown does not support letters as list bullets - convert to number
+		assert self.context[-1].tag in (BULLETLIST, NUMBEREDLIST), 'Do not support raw pageview output here'
+		if self.context[-1].tag == NUMBEREDLIST \
+			and not self.context[-1].attrib.get('_iter'):
+				# First item on this level
+				iter = self.context[-1].attrib.get('start', '1')
+				self.context[-1].attrib['_iter'] = convert_list_iter_letter_to_number(iter)
+		return TextDumper.dump_li(self, tag, attrib, strings)
+
 	def dump_pre(self, tag, attrib, strings):
 		# OPEN ISSUE: no indent for verbatim blocks
 		return self.prefix_lines('\t', strings)
@@ -92,16 +104,35 @@ class Dumper(TextDumper):
 			'BUG: link misses href: %s "%s"' % (attrib, strings)
 		href = self.linker.link(attrib['href'])
 		text = ''.join(strings) or href
-		if href == text and url_re.match(href):
+		if href == text and old_url_link_re.match(href):
 			return ['<', href, '>']
 		else:
 			return ['[%s](%s)' % (text, href)]
 
 	def dump_img(self, tag, attrib, strings=None):
-		# OPEN ISSUE: image properties used in zim not supported in pandoc
 		src = self.linker.img(attrib['src'])
 		text = attrib.get('alt', '')
-		return ['![%s](%s)' % (text, src)]
+
+		# Handle image dimensions and ids
+		# Pandoc support setting dimensions like this:
+		# ![Alt text](href){ width=500px height=20px }
+		dimensions = filter(lambda i: i[0] in ['width', 'height'], attrib.items())
+		properties = ["%s=%spx" % (k, v) for k, v in dimensions]
+
+		if 'id' in attrib:
+			properties.append('#' + attrib['id'])
+
+		if len(properties) > 0:
+			props = '{ %s }' % (' '.join(properties))
+		else:
+			props = ''
+
+		# Handle image links by nesting the image inside a link
+		if 'href' in attrib:
+			href = attrib.get('href')
+			return ['[![%s](%s)%s](%s)' % (text, src, props, href)]
+
+		return ['![%s](%s)%s' % (text, src, props)]
 
 	def dump_object_fallback(self, tag, attrib, strings=None):
 		# dump object as verbatim block

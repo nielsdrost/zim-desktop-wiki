@@ -13,17 +13,15 @@ logger = logging.getLogger('zim.gui')
 import zim
 from zim.actions import action
 
-from zim.main import ZIM_APPLICATION
-
-from zim.parsing import url_encode, URL_ENCODE_DATA
+from zim.parse.encode import url_encode, URL_ENCODE_DATA
 from zim.templates import list_templates, get_template
 
 from zim.config import data_file, ConfigManager
-from zim.notebook import Path, PageExistsError, NotebookOperation
+from zim.notebook import Path, PageExistsError, NotebookOperation, PageNotAvailableError
 from zim.notebook.index import IndexNotFoundError, LINK_DIR_BACKWARD
 
 from zim.actions import get_gtk_actiongroup
-from zim.gui.widgets import Dialog, FileDialog, ProgressDialog, ErrorDialog, ScrolledTextView
+from zim.gui.widgets import Dialog, FileDialog, ProgressDialog, ErrorDialog, QuestionDialog, ScrolledTextView
 from zim.gui.applications import open_url, open_folder, open_folder_prompt_create, open_file, edit_file
 
 PAGE_EDIT_ACTIONS = 'page_edit'
@@ -123,21 +121,7 @@ class UIActions(object):
 	def show_open_notebook(self):
 		'''Show the L{NotebookDialog} dialog'''
 		from zim.gui.notebookdialog import NotebookDialog
-		NotebookDialog.unique(self, self.widget, callback=self.open_notebook).present()
-
-	def open_notebook(self, location, pagename=None):
-		'''Open another notebook.
-		@param location: notebook location as uri or object with "uri" attribute
-		@param pagename: optional page name
-		'''
-		assert isinstance(location, str) or hasattr(location, 'uri')
-		assert pagename is None or isinstance(pagename, str)
-
-		uri = location.uri if hasattr(location, 'uri') else location
-		if pagename:
-			ZIM_APPLICATION.run('--gui', uri, pagename)
-		else:
-			ZIM_APPLICATION.run('--gui', uri)
+		NotebookDialog.unique(self, self.widget, callback=self.navigation.open_notebook).present()
 
 	@action(_('_Import Page...'), menuhints='notebook:edit') # T: Menu item
 	def import_page(self):
@@ -145,17 +129,22 @@ class UIActions(object):
 		ImportPageDialog(self.widget, self.navigation, self.notebook, self.page).run()
 
 	@action(_('Open in New _Window')) # T: Menu item
-	def open_new_window(self, page=None):
-		'''Menu action to open a page in a secondary L{PageWindow}
+	def open_new_window(self, page=None, anchor=None, anchor_fail_silent=False):
+		'''Menu action to open a page in a L{PageWindow}
 		@param page: the page L{Path}, deafults to current selected
+		@param anchor: optional anchor id
+		@param anchor_fail_silent: ignore error when anchor id does not exist in page
 		'''
 		from zim.gui.mainwindow import PageWindow
 
-		PageWindow(
+		window = PageWindow(
 			self.notebook,
 			page or self.page,
-			self.navigation
-		).present()
+			self.navigation,
+		)
+		window.present()
+		if anchor:
+			window.pageview.navigate_to_anchor(anchor, fail_silent=anchor_fail_silent)
 
 	@action(_('Save A _Copy...')) # T: Menu item
 	def save_copy(self):
@@ -182,7 +171,7 @@ class UIActions(object):
 		)
 		_callback(self.widget, url)
 
-	@action(_('_Rename or move Page...'), accelerator='F2', menuhints='notebook:edit') # T: Menu item
+	@action(_('_Rename or Move Page...'), accelerator='F2', menuhints='notebook:edit') # T: Menu item
 	def move_page(self, path=None):
 		'''Menu action to show the L{MovePageDialog}
 		@param path: a L{Path} object, or C{None} to move to current
@@ -194,8 +183,7 @@ class UIActions(object):
 	@action(_('_Delete Page'), menuhints='notebook:edit') # T: Menu item
 	def delete_page(self, path=None):
 		'''Delete a page by either trashing it, or permanent deletion after
-		confirmation of a L{DeletePageDialog}. When trashing the update behavior
-		depends on the "remove_links_on_delete" preference.
+		confirmation of a L{TrashPageDialog} or L{DeletePageDialog}.
 
 		@param path: a L{Path} object, or C{None} for the current selected page
 		'''
@@ -203,14 +191,6 @@ class UIActions(object):
 		# So ideally we want to know whether trash is supported, but we only
 		# know for sure when we try. Thus we risk prompting twice: once for
 		# trash and once for deletion if trash fails.
-		# On windows the system will also prompt to confirm trashing, once
-		# for the file and once for the folder. So adding our own prompt
-		# will make it worse.
-		# So we first attempt to trash and only if it fails we prompt for
-		# to confirm for permanent deletion. From the application point of
-		# view this is not perfect since we can't undo deletion from within
-		# the application.
-		from zim.newfs.helpers import TrashNotSupportedError
 
 		path = path or self.page
 		assert path is not None
@@ -218,22 +198,22 @@ class UIActions(object):
 		if not self.ensure_index_uptodate():
 			return
 
-		preferences = ConfigManager.preferences['GtkInterface']
-		update_links = preferences.setdefault('remove_links_on_delete', True)
-		op = NotebookOperation(
-			self.notebook,
-			_('Removing Links'), # T: Title of progressbar dialog
-			self.notebook.trash_page_iter(path, update_links)
-		)
-		dialog = ProgressDialog(self.widget, op)
-		try:
-			dialog.run()
-		except TrashNotSupportedError:
-			pass # only during test, else error happens in idle handler
+		# TODO: if page is placeholder, present different dialog ?
+		#       explain no file is deleted, only links can be removed, which is not reversable
 
-		if op.exception and isinstance(op.exception, TrashNotSupportedError):
-			logger.info('Trash not supported: %s', op.exception.msg)
-			DeletePageDialog(self.widget, self.notebook, path, update_links=update_links).run()
+		if self.notebook.config['Notebook']['disable_trash']:
+			return DeletePageDialog(self.widget, self.notebook, path).run()
+		else:
+			# Try to trash - if fail, go to delete anyway
+			error = TrashPageDialog(self.widget, self.notebook, path).run()
+			if error:
+				if QuestionDialog(
+					self.widget,
+					_("Trash failed, do you want to permanently delete instead ?")
+						# T: question in "delete page" action
+				).run():
+					return DeletePageDialog(self.widget, self.notebook, path).run()
+
 
 	@action(_('Proper_ties')) # T: Menu item
 	def show_properties(self):
@@ -243,17 +223,14 @@ class UIActions(object):
 
 		# Changing plugin properties can modify the index state
 		if not self.notebook.index.is_uptodate:
-			self.reload_index(update_only=True)
+			self.check_and_update_index(update_only=True)
 
 	@action(_('_Quit'), '<Primary>Q') # T: Menu item
 	def quit(self):
-		'''Menu action for quit.
-		@emits: quit
+		'''Menu action for quitting the application
 		'''
-		if Gtk.main_level() > 0:
-			Gtk.main_quit()
-		# We expect the application to call "destroy" on all windows once
-		# it is bumped out of the main loop
+		application = self.widget.get_toplevel().get_application()
+		application.quit()
 
 	@action(_('Copy _Location'), accelerator='<shift><Primary>L') # T: Menu item
 	def copy_location(self):
@@ -268,17 +245,17 @@ class UIActions(object):
 		TemplateEditorDialog(self.widget).run()
 
 	@action(_('Pr_eferences'), '<Primary>comma') # T: Menu item
-	def show_preferences(self):
+	def show_preferences(self, show_tab=None, select_plugin=None):
 		'''Menu action to show the L{PreferencesDialog}'''
 		from zim.gui.preferencesdialog import PreferencesDialog
-		PreferencesDialog(self.widget).run()
+		PreferencesDialog(self.widget, show_tab=show_tab, select_plugin=select_plugin).run()
 
 		# Loading plugins can modify the index state
 		if not self.notebook.index.is_uptodate:
-			self.reload_index(update_only=True)
+			self.check_and_update_index(update_only=True)
 
-	@action(_('_Search...'), '<shift><Primary>F') # T: Menu item
-	def show_search(self, query=None):
+	@action(_('_Search...'), '<shift><Primary>F', verb_icon='edit-find-symbolic') # T: Menu item
+	def show_search(self, query=None, focus_results=False):
 		'''Menu action to show the L{SearchDialog}
 		@param query: the search query to show
 		'''
@@ -292,10 +269,16 @@ class UIActions(object):
 		if query is not None:
 			dialog.search(query)
 
+		if focus_results:
+			dialog.results_treeview.grab_focus()
+		else:
+			dialog.query_entry.grab_focus()
+			dialog.query_entry.set_position(-1)
+
 	@action(_('Search this section')) # T: Menu item for search a sub-set of the notebook
 	def show_search_section(self, page=None):
 		page = page or self.page
-		self.show_search(query='Section: "%s"' % page.name)
+		self.show_search(query='Section: "%s" ' % page.name)
 
 	@action(_('Search _Backlinks...')) # T: Menu item
 	def show_search_backlinks(self, page=None):
@@ -303,7 +286,7 @@ class UIActions(object):
 		backlinks
 		'''
 		page = page or self.page
-		self.show_search(query='LinksTo: "%s"' % page.name)
+		self.show_search(query='LinksTo: "%s" ' % page.name, focus_results=True)
 
 	@action(_('Recent Changes...')) # T: Menu item
 	def show_recent_changes(self):
@@ -312,7 +295,7 @@ class UIActions(object):
 		dialog = RecentChangesDialog.unique(self, self.widget, self.notebook, self.navigation)
 		dialog.present()
 
-	@action(_('Open Attachments _Folder')) # T: Menu item
+	@action(_('Open Attachments _Folder'), menuhints='tools', icon='folder') # T: Menu item
 	def open_attachments_folder(self):
 		'''Menu action to open the attachment folder for the current page'''
 		dir = self.notebook.get_attachments_dir(self.page)
@@ -353,7 +336,7 @@ class UIActions(object):
 		# Of course users can still define a custom tool for other editors.
 		page = page or self.page
 
-		edit_file(self.widget, self.page.source, istextfile=True)
+		edit_file(self.widget, self.page.source_file, istextfile=True)
 		page.check_source_changed()
 
 	@action(_('Start _Web Server')) # T: Menu item
@@ -361,9 +344,13 @@ class UIActions(object):
 		'''Menu action to show the server interface from
 		L{zim.gui.server}. Spawns a new zim instance for the server.
 		'''
-		ZIM_APPLICATION.run('--server', '--gui', self.notebook.uri)
+		from zim.gui.server import ServerWindow
+		window = ServerWindow(self.notebook.uri)
+		window.show_all()
+		application = self.widget.get_toplevel().get_application()
+		application.add_window(window)
 
-	@action(_('View debug log'), menuhints='tools') # T: menu item
+	@action(_('View Debug Log'), menuhints='tools') # T: menu item
 	def show_debug_log(self):
 		from zim.newfs import LocalFile
 		file = LocalFile(zim.debug_log_file)
@@ -371,14 +358,14 @@ class UIActions(object):
 
 	def ensure_index_uptodate(self):
 		if not self.notebook.index.is_uptodate:
-			re = self.reload_index(update_only=True)
+			re = self.check_and_update_index(update_only=True)
 			assert re is not None # check we really get bool
 			return re
 		else:
 			return True
 
-	@action(_('Update Index')) # T: Menu item
-	def reload_index(self, update_only=False):
+	@action(_('Check and Update Index')) # T: Menu item
+	def check_and_update_index(self, update_only=False):
 		'''Check the notebook for changes and update the index.
 		Shows an progressbar while updateing.
 		@param update_only: if C{True} only updates are done, if C{False} also
@@ -394,12 +381,15 @@ class UIActions(object):
 			dialog = ProgressDialog(self.widget, op)
 			dialog.run()
 
+			if op.exception:
+				raise op.exception
+
 			if update_only or isinstance(op, IndexCheckAndUpdateOperation):
 				return not dialog.cancelled
 			else:
 				# ongoing op was update only but we want check, so try again
 				if not dialog.cancelled:
-					return self.reload_index() # recurs
+					return self.check_and_update_index() # recurs
 				else:
 					return False
 
@@ -407,6 +397,9 @@ class UIActions(object):
 			op = IndexCheckAndUpdateOperation(self.notebook)
 			dialog = ProgressDialog(self.widget, op)
 			dialog.run()
+
+			if op.exception:
+				raise op.exception
 
 			return not dialog.cancelled
 
@@ -422,10 +415,7 @@ class UIActions(object):
 		instance showing the notebook with the manual.
 		@param page: manual page to show (string)
 		'''
-		if page:
-			ZIM_APPLICATION.run('--manual', page)
-		else:
-			ZIM_APPLICATION.run('--manual')
+		self.navigation.open_manual(page)
 
 	@action(_('_FAQ')) # T: Menu item
 	def show_help_faq(self):
@@ -495,23 +485,39 @@ class NewPageDialog(Dialog):
 		if not path:
 			return False
 
-		page = self.notebook.get_page(path) # can raise PageNotFoundError
-		if page.exists():
-			raise PageExistsError(path)
+		try:
+			page = self.notebook.get_page(path) # can raise PageNotFoundError
+		except PageNotAvailableError as error:
+			self.hide()
+			# Same code in MainWindow.open_page()
+			if QuestionDialog(self, (
+				_('File exists, do you want to import?'), # T: short question on open-page if file exists
+				_('The file "%s" exists but is not a wiki page.\nDo you want to import it?') % error.file.basename # T: longer question on open-page if file exists
+			)).run():
+				from zim.import_files import import_file
+				page = import_file(error.file, self.notebook, path)
+			else:
+				return False # user cancelled
 
-		template = get_template('wiki', self.form['template'])
-		tree = self.notebook.eval_new_page_template(page, template)
-		page.set_parsetree(tree)
-		self.notebook.store_page(page)
+			template = None
+		else:
+			if page.exists():
+				raise PageExistsError(path)
+
+			template = get_template('wiki', self.form['template'])
+			tree = self.notebook.eval_new_page_template(page, template)
+			page.set_parsetree(tree)
+			self.notebook.store_page(page)
 
 		pageview = self.navigation.open_page(page)
-		if pageview is not None:
+		if pageview and template:
 			pageview.set_cursor_pos(-1) # HACK set position to end of template
 		return True
 
 
 class ImportPageDialog(FileDialog):
-	# TODO how to properly detect file types for other formats ?
+
+	# TODO: extend to selecting multiple files at once, select target location, format etc.
 
 	def __init__(self, widget, navigation, notebook, page=None):
 		FileDialog.__init__(self, widget, _('Import Page')) # T: Dialog title
@@ -523,23 +529,14 @@ class ImportPageDialog(FileDialog):
 		if page is not None:
 			self.add_shortcut(notebook, page)
 
-		# TODO add input for namespace, format
-
 	def do_response_ok(self):
+		from zim.import_files import import_file_from_user_input
+
 		file = self.get_file()
 		if file is None:
 			return False
 
-		basename = file.basename
-		if basename.endswith('.txt'):
-			basename = basename[:-4]
-
-		path = self.notebook.pages.lookup_from_user_input(basename)
-		page = self.notebook.get_new_page(path)
-		assert not page.exists()
-
-		page.parse('wiki', file.readlines())
-		self.notebook.store_page(page)
+		page = import_file_from_user_input(file, self.notebook)
 		self.navigation.open_page(page)
 		return True
 
@@ -641,18 +638,19 @@ class MovePageDialog(Dialog):
 		)
 		dialog = ProgressDialog(self, op)
 		dialog.run()
+		if op.exception:
+			raise op.exception
+		else:
+			return True
 
-		return True
 
+class DeletePageDialogBase(Dialog):
 
-class DeletePageDialog(Dialog):
-
-	def __init__(self, widget, notebook, path, update_links=True):
+	def __init__(self, widget, notebook, path):
 		assert path, 'Need a page here'
-		Dialog.__init__(self, widget, _('Delete Page')) # T: Dialog title
+		Dialog.__init__(self, widget, self.title)
 		self.notebook = notebook
 		self.path = path
-		self.update_links = update_links
 
 		hbox = Gtk.HBox(spacing=12)
 		self.vbox.add(hbox)
@@ -664,12 +662,15 @@ class DeletePageDialog(Dialog):
 		hbox.pack_start(vbox, False, True, 0)
 
 		label = Gtk.Label()
-		short = _('Delete page "%s"?') % self.path.basename
-			# T: Heading in 'delete page' dialog - %s is the page name
-		longmsg = _('Page "%s" and all of it\'s\nsub-pages and attachments will be deleted') % self.path.name
-			# T: Text in 'delete page' dialog - %s is the page name
-		label.set_markup('<b>' + short + '</b>\n\n' + longmsg)
-		vbox.pack_start(label, False, True, 0)
+		string = '<b>' + (self.shortmsg % self.path.basename) + '</b>\n\n' + (self.longmsg  % self.path.name)
+		label.set_markup(string)
+		vbox.pack_start(label, False, True, 5)
+
+		string = _('Remove links to %s') % self.path # T: label in DeletePageDialog
+		self.uistate.setdefault('update_links', True)
+		self.update_links_checkbutton = Gtk.CheckButton.new_with_mnemonic(string)
+		self.update_links_checkbutton.set_active(self.uistate['update_links'])
+		vbox.pack_start(self.update_links_checkbutton, False, True, 0)
 
 		# TODO use expander here
 		page = self.notebook.get_page(self.path)
@@ -680,8 +681,7 @@ class DeletePageDialog(Dialog):
 			text += self._get_file_tree_as_text(dir)
 			n = len([l for l in text.splitlines() if l.strip() and not l.endswith('/')])
 
-		string = ngettext('%i file will be deleted', '%i files will be deleted', n) % n
-			# T: label in the DeletePage dialog to warn user of attachments being deleted
+		string = self._ngettext_label_n_files(n)
 		if n > 0:
 			string = '<b>' + string + '</b>'
 
@@ -707,16 +707,76 @@ class DeletePageDialog(Dialog):
 			text += path + '\n'
 		return text
 
+
+class TrashPageDialog(DeletePageDialogBase):
+
+	title = _('Trash Page') # T: Dialog title
+	shortmsg = _('Move page "%s" to trash?')
+		# T: Heading in 'trash page' dialog - %s is the page name
+	longmsg = _('Page "%s" and all of it\'s sub-pages and\nattachments will be moved to your system\'s trash.\n\nTo undo later, go to your system\'s trashcan.')
+		# T: Text in 'trash page' dialog - %s is the page name
+
+	def _ngettext_label_n_files(self, n):
+		return ngettext('%i file will be trashed', '%i files will be trashed', n) % n
+			# T: label in the TrashPage dialog to warn user of attachments being deleted
+
 	def do_response_ok(self):
+		from zim.newfs.helpers import TrashNotSupportedError
+
+		self.uistate['update_links'] = self.update_links_checkbutton.get_active()
+
 		op = NotebookOperation(
 			self.notebook,
 			_('Removing Links'), # T: Title of progressbar dialog
-			self.notebook.delete_page_iter(self.path, self.update_links)
+			self.notebook.trash_page_iter(self.path, self.uistate['update_links'])
+		)
+		dialog = ProgressDialog(self, op)
+		try:
+			dialog.run()
+		except TrashNotSupportedError:
+			# only during test, else error happens in idle handler
+			logger.info('Trash not supported: %s', op.exception.msg)
+			self.result = TrashNotSupportedError
+		else:
+			if op.exception and isinstance(op.exception, TrashNotSupportedError):
+				logger.info('Trash not supported: %s', op.exception.msg)
+				self.result = TrashNotSupportedError
+			elif op.exception:
+				self.result = op.exception
+				raise op.exception
+			else:
+				pass
+
+		return True # we return error via result, handler always OK
+
+
+class DeletePageDialog(DeletePageDialogBase):
+
+	title = _('Delete Page') # T: Dialog title
+	shortmsg = _('Delete page "%s"?')
+		# T: Heading in 'delete page' dialog - %s is the page name
+	longmsg = _('Page "%s" and all of it\'s sub-pages and\nattachments will be deleted.\n\nThis deletion is permanent and cannot be un-done.')
+		# T: Text in 'delete page' dialog - %s is the page name
+
+	def _ngettext_label_n_files(self, n):
+		return ngettext('%i file will be deleted', '%i files will be deleted', n) % n
+			# T: label in the DeletePage dialog to warn user of attachments being deleted
+
+	def do_response_ok(self):
+		self.uistate['update_links'] = self.update_links_checkbutton.get_active()
+
+		op = NotebookOperation(
+			self.notebook,
+			_('Removing Links'), # T: Title of progressbar dialog
+			self.notebook.delete_page_iter(self.path, self.uistate['update_links'])
 		)
 		dialog = ProgressDialog(self, op)
 		dialog.run()
 
-		return True
+		if op.exception:
+			raise op.exception
+		else:
+			return True
 
 
 class MyAboutDialog(Gtk.AboutDialog):

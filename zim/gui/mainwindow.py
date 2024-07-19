@@ -1,5 +1,5 @@
 
-# Copyright 2008-2018 Jaap Karssenberg <jaap.karssenberg@gmail.com>
+# Copyright 2008-2022 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 import os
 import sys
@@ -13,40 +13,37 @@ logger = logging.getLogger('zim.gui')
 
 
 from zim.config import data_file, value_is_coord, ConfigDict, Boolean, ConfigManager
-from zim.signals import DelayedCallback
+from zim.signals import DelayedCallback, ConnectorMixin
 
-from zim.notebook import Path, Page, LINK_DIR_BACKWARD
+from zim.notebook import Path, Page, LINK_DIR_BACKWARD, PageNotAvailableError
 from zim.notebook.index import IndexNotFoundError
 from zim.notebook.operations import ongoing_operation
 from zim.history import History, HistoryPath
 
-from zim.actions import action, toggle_action, radio_action, radio_option, get_gtk_actiongroup, \
+from zim.actions import action, toggle_action, radio_action, radio_option, \
+	get_gtk_actiongroup, initialize_actiongroup, \
 	PRIMARY_MODIFIER_STRING, PRIMARY_MODIFIER_MASK
 from zim.gui.widgets import \
 	MenuButton, \
 	Window, Dialog, \
-	ErrorDialog, FileDialog, ProgressDialog, MessageDialog, \
+	ErrorDialog, FileDialog, ProgressDialog, MessageDialog, QuestionDialog, \
 	ScrolledTextView, \
-	gtk_popup_at_pointer
+	gtk_popup_at_pointer, \
+	TOP, BOTTOM
 
 from zim.gui.navigation import NavigationModel
 from zim.gui.uiactions import UIActions
-from zim.gui.customtools import CustomToolManagerUI
+from zim.gui.customtools import CustomToolManager, CustomToolManagerUI
 from zim.gui.insertedobjects import InsertedObjectUI
 
 from zim.gui.pageview import PageView
+from zim.gui.pageview.editbar import ToolBarEditBarManager
+from zim.gui.notebookview import NotebookView
 
-from zim.plugins import ExtensionBase, extendable
-from zim.gui.actionextension import ActionExtensionBase
+from zim.plugins import ExtensionBase, extendable, PluginManager
+from zim.gui.actionextension import ActionExtensionBase, \
+	populate_toolbar_with_actions, os_default_headerbar
 
-
-TOOLBAR_ICONS_AND_TEXT = 'icons_and_text'
-TOOLBAR_ICONS_ONLY = 'icons_only'
-TOOLBAR_TEXT_ONLY = 'text_only'
-
-TOOLBAR_ICONS_LARGE = 'large'
-TOOLBAR_ICONS_SMALL = 'small'
-TOOLBAR_ICONS_TINY = 'tiny'
 
 MENU_ACTIONS = (
 	('file_menu', None, _('_File')), # T: Menu title
@@ -58,19 +55,26 @@ MENU_ACTIONS = (
 	('tools_menu', None, _('_Tools')), # T: Menu title
 	('go_menu', None, _('_Go')), # T: Menu title
 	('help_menu', None, _('_Help')), # T: Menu title
-	('toolbar_menu', None, _('_Toolbar')), # T: Menu title
 	('checkbox_menu', None, _('_Checkbox')), # T: Menu title
 )
+if sys.platform == "darwin":
+	# don't use mnemonics on macOS to allow alt-<letter> shortcuts
+	MENU_ACTIONS = tuple((t[0], t[1], t[2].replace('_', '')) for t in MENU_ACTIONS)
+
 
 #: Preferences for the user interface
 ui_preferences = (
 	# key, type, category, label, default
+	('prefer-dark-theme', 'bool', 'Interface', _('Prefer dark theme')
+		+ '\n' + _('This option requires a Gtk theme supporting a dark variant')
+		+ '\n' + _('This option requires restart of the application'), False),
+		# T: option for preferences dialog
+	('show_headerbar', 'bool', 'Interface', _('Show controls in the window decoration') + '\n' + _('This option requires restart of the application'), os_default_headerbar),
+		# T: option for preferences dialog
 	('toggle_on_ctrlspace', 'bool', 'Interface', _('Use %s to switch to the side pane') % (PRIMARY_MODIFIER_STRING + '<Space>'), False),
 		# T: Option in the preferences dialog - %s will map to either <Control><Space> or <Command><Space> key binding
 		# default value is False because this is mapped to switch between
 		# char sets in certain international key mappings
-	('remove_links_on_delete', 'bool', 'Interface', _('Remove links when deleting pages'), True),
-		# T: Option in the preferences dialog
 	('always_use_last_cursor_pos', 'bool', 'Interface', _('Always use last cursor position when opening a page'), True),
 		# T: Option in the preferences dialog
 )
@@ -92,7 +96,7 @@ def schedule_on_idle(function, args=()):
 class MainWindowExtension(ActionExtensionBase):
 	'''Base class for extending the L{MainWindow}
 
-	Menu and toolbar actions can be defined by defining an action method
+	Menu actions can be defined by defining an action method
 	and specifying where in the menu this should be placed.
 
 	An action method is any object method of the extension method that
@@ -129,8 +133,292 @@ class MainWindowExtension(ActionExtensionBase):
 		self.destroy()
 
 
+class WindowBaseMixin(ConnectorMixin, object):
+	'''Common logic between MainWindow and PageWindow'''
+
+	def _init_fullscreen_headerbar(self):
+		# Create eventbox for headerbar
+		self._in_fullscreen_eventbox = False
+		self._fullscreen_eventbox = Gtk.EventBox()
+		self._fullscreen_eventbox.set_valign(Gtk.Align.START)
+		self._fullscreen_eventbox.set_size_request(1, -1) # 1 pixel sensitive area on top of the screen
+		self._zim_window_overlay.add_overlay(self._fullscreen_eventbox)
+		self._fullscreen_revealer = Gtk.Revealer()
+		self._fullscreen_eventbox.add(self._fullscreen_revealer)
+		self._fullscreen_headerbar = Gtk.HeaderBar()
+		self._fullscreen_revealer.add(self._fullscreen_headerbar)
+
+		close_button = Gtk.Button()
+		close_button.set_image(Gtk.Image.new_from_icon_name('view-restore-symbolic',  Gtk.IconSize.BUTTON))
+		close_button.set_tooltip_text(_('Leave Fullscreen')) # T: button label for fullscreen window header
+		close_button.connect('clicked', lambda o: self.toggle_fullscreen(False))
+		self._fullscreen_headerbar.pack_end(close_button)
+
+		self._fullscreen_eventbox.show_all()
+		self._fullscreen_eventbox.set_no_show_all(True)
+		self._fullscreen_eventbox.hide()
+		self._fullscreen_eventbox.connect('enter-notify-event', self._on_fullscreen_eventbox_enter)
+		self._fullscreen_eventbox.connect('leave-notify-event', self._on_fullscreen_eventbox_leave)
+
+		# Generic state for fullscreen
+		self.maximized = False
+		self.isfullscreen = False
+		self.connect_after('window-state-event', self.__class__.on_window_state_event)
+
+	def on_window_state_event(self, event):
+		if bool(event.changed_mask & Gdk.WindowState.MAXIMIZED):
+			self.maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
+			schedule_on_idle(lambda: self.pageview.scroll_cursor_on_screen())
+
+		if bool(event.changed_mask & Gdk.WindowState.FULLSCREEN):
+			self.isfullscreen = bool(event.new_window_state & Gdk.WindowState.FULLSCREEN)
+			self.toggle_fullscreen.set_active(self.isfullscreen)
+			schedule_on_idle(lambda: self.pageview.scroll_cursor_on_screen())
+
+			if self.isfullscreen:
+				self._fullscreen_eventbox.show()
+			else:
+				self._fullscreen_eventbox.hide()
+
+			self.update_toolbar()
+
+	def _on_fullscreen_eventbox_enter(self, *a):
+		if self._headerbar is None and self._toolbar and self._toolbar.get_visible():
+			# Do not show fullscreen headerbar if headerbar controls are in toolbar *and* visible
+			# because headerbar will be redundant. If toolbar is not visible, we need at least "exit fullscreen"
+			return
+
+		self._in_fullscreen_eventbox = True
+		self._update_fullscreen_revealer()
+
+	def _on_fullscreen_eventbox_leave(self, *a):
+		self._in_fullscreen_eventbox = False
+		self._update_fullscreen_revealer()
+
+	def _update_fullscreen_revealer(self, *a):
+		# keep showing headerbar as long as any popup menu is open
+		show = self._in_fullscreen_eventbox or any(
+			c.get_active() for c in self._fullscreen_headerbar.get_children() if isinstance(c, Gtk.MenuButton)
+		)
+		self._fullscreen_revealer.set_reveal_child(show)
+
+	def _populate_headerbars(self):
+		for headerbar in (self._headerbar, self._fullscreen_headerbar):
+			if headerbar is not None:
+				self._populate_headerbar(headerbar)
+				headerbar.show_all()
+
+		for c in self._fullscreen_headerbar.get_children():
+			if isinstance(c, Gtk.MenuButton):
+				c.connect('toggled', self._update_fullscreen_revealer)
+
+	def _init_toolbar(self):
+		# One time setup of the toolbar widget
+		assert self.pageview, 'Ensure pageview is initalized to let preferences be loaded'
+
+		self._toolbar = Gtk.Toolbar()
+		self._toolbar_editbar_manager = ToolBarEditBarManager(self.pageview, self._toolbar)
+
+		self.setup_toolbar()
+
+		def on_extensions_changed(o, obj):
+			if obj in (self, self.pageview):
+				self.update_toolbar()
+
+		self.connectto(PluginManager, 'extensions-changed', on_extensions_changed)
+
+		def on_changed_update(o, *a):
+			self.update_toolbar()
+
+		self.connectto(CustomToolManager(), 'changed', on_changed_update)
+		self.connectto(self.pageview.preferences, 'changed', on_changed_update)
+
+	def setup_toolbar(self, show=None, position=None):
+		# Default setup for toolbar - can be called multiple times - also used by "toolbar" plugin
+		try:
+			self.remove(self._toolbar)
+		except ValueError:
+			pass
+
+		# Defaults
+		if show is None:
+			show = not self.preferences['show_headerbar']
+
+		position = TOP if position is None else position
+
+		# Set toolbar in window
+		if show:
+			self.add_bar(self._toolbar, position=position)
+			if position in (TOP, BOTTOM):
+				self._toolbar.set_orientation(Gtk.Orientation.HORIZONTAL)
+			else: # LEFT, RIGHT
+				self._toolbar.set_orientation(Gtk.Orientation.VERTICAL)
+			self._toolbar.show()
+			self.update_toolbar()
+		else:
+			self._toolbar.hide()
+
+		return self._toolbar
+
+	def update_toolbar(self):
+		# This method updates the toolbar content. See setup_toolbar() to
+		# control placement and visibility.
+		if self._toolbar.get_visible():
+			for item in self._toolbar.get_children():
+				self._toolbar.remove(item)
+			self._populate_toolbar(self._toolbar)
+
+			if self.isfullscreen and not self.preferences['show_headerbar']:
+				close_button = Gtk.ToolButton()
+				close_button.set_icon_name('view-restore-symbolic')
+				close_button.set_tooltip_text(_('Leave Fullscreen')) # T: button label for fullscreen window header
+				close_button.connect('clicked', lambda o: self.toggle_fullscreen(False))
+				self._toolbar.insert(close_button, -1)
+
+			self._toolbar.show_all()
+
+	def _populate_toolbar_inner(self, toolbar):
+		if not self.pageview.preferences['show_edit_bar']:
+			self._toolbar_editbar_manager.populate_toolbar(toolbar)
+
+		populate_toolbar_with_actions(
+			self._toolbar, self, self.pageview,
+			include_headercontrols=(not self.preferences['show_headerbar']),
+			include_customtools=True
+		)
+
+	def set_title(self, text):
+		Gtk.Window.set_title(self, text)
+		if self._headerbar is not None:
+			self._headerbar.set_title(text)
+		self._fullscreen_headerbar.set_title(text)
+
+	@toggle_action(_('_Fullscreen'), 'F11', icon='view-fullscreen-symbolic', init=False) # T: Menu item
+	def toggle_fullscreen(self, show):
+		'''Menu action to toggle the fullscreen state of the window'''
+		if show:
+			self.fullscreen()
+		else:
+			self.unfullscreen()
+
+	@toggle_action(_('Toggle _Editable'), icon='document-edit-symbolic', init=True, tooltip=_('Toggle editable')) # T: menu item
+	def toggle_editable(self, editable):
+		'''Menu action to toggle the read-only state of the application
+		@emits: readonly-changed
+		'''
+		readonly = not editable
+		if readonly and self.page and self.page.modified:
+			# Save any modification now - will not be allowed after switch
+			self.pageview.save_changes()
+
+		for group in self.uimanager.get_action_groups():
+			for action in group.list_actions():
+				if hasattr(action, 'zim_readonly') \
+				and not action.zim_readonly:
+					action.set_sensitive(not readonly)
+
+		try:
+			self.uistate['readonly'] = readonly
+		except KeyError:
+			pass
+		self.emit('readonly-changed', readonly)
+
+	def set_toggle_editable_state(self, editable_uistate):
+		'''Set sensitivity of the "toggle_editable" action
+		@param editable_uistate: default state if control is sensitive
+		'''
+		if self.notebook.readonly or self.page.readonly:
+			if self.toggle_editable.get_sensitive():
+				self.toggle_editable.set_sensitive(False)
+				self._set_tooltip_hack(_('Page is read-only and cannot be edited')) # T: message in toggle editable tooltip
+
+		else:
+			if not self.toggle_editable.get_sensitive():
+				self.toggle_editable.set_sensitive(True)
+				self._set_tooltip_hack(self.toggle_editable.tooltip) # reset to default
+
+			self.toggle_editable(editable_uistate)
+
+	def _set_tooltip_hack(self, text):
+		for proxy in self.toggle_editable._proxies: # XXX
+			if hasattr(proxy, 'set_tooltip_text'):
+				proxy.set_tooltip_text(text)
+
+	def _style_toggle_editable_button(self, button):
+		def _change_style_on_toggle(button):
+			context = button.get_style_context()
+			if button.get_active():
+				context.remove_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+			else:
+				context.add_class(Gtk.STYLE_CLASS_SUGGESTED_ACTION)
+		_change_style_on_toggle(button)
+		button.connect('toggled', _change_style_on_toggle)
+
+	def do_pane_state_changed(self, pane, *a):
+		if not hasattr(self, 'actiongroup') \
+		or self._block_toggle_panes:
+			return
+
+		action = self.actiongroup.get_action('toggle_panes')
+		visible = bool(self.get_visible_panes())
+		if visible != action.get_active():
+			action.set_active(visible)
+
+	@toggle_action(_('_Side Panes'), 'F9', icon='gtk-index', init=True) # T: Menu item
+	def toggle_panes(self, show):
+		'''Menu action to toggle the visibility of the all panes
+		@param show: when C{True} or C{False} force the visibility,
+		when C{None} toggle based on current state
+		'''
+		self._block_toggle_panes = True
+		Window.toggle_panes(self, show)
+		self._block_toggle_panes = False
+
+		if show:
+			self.focus_sidepane()
+		else:
+			self.pageview.grab_focus()
+
+		self._sidepane_autoclose = False
+		self.save_uistate()
+
+	def do_set_focus(self, widget):
+		Window.do_set_focus(self, widget)
+		if widget == self.pageview.textview \
+		and self._sidepane_autoclose:
+			# Sidepane open and should close automatically
+			self.toggle_panes(False)
+
+	@action(_('Focus Sidepane')) # T: menu item
+	def focus_sidepane_key_toggle(self):
+		self.do_focus_sidepane_key_toggle()
+
+	def do_focus_sidepane_key_toggle(self, *a):
+		'''Switch focus between the textview and the page index.
+		Automatically opens the sidepane if it is closed
+		(but sets a property to automatically close it again).
+		This method is used for the (optional) <Primary><Space> keybinding.
+		'''
+		action = self.actiongroup.get_action('toggle_panes')
+		if action.get_active():
+			# side pane open
+			if self.pageview.textview.is_focus():
+				self.focus_sidepane()
+			else:
+				if self._sidepane_autoclose:
+					self.toggle_panes(False)
+				else:
+					self.pageview.grab_focus()
+		else:
+			# open the pane
+			self.toggle_panes(True)
+			self._sidepane_autoclose = True
+
+		return True # stop
+
+
 @extendable(MainWindowExtension)
-class MainWindow(Window):
+class MainWindow(WindowBaseMixin, Window):
 
 	# define signals we want to use - (closure type, return type and arg types)
 	__gsignals__ = {
@@ -156,16 +444,8 @@ class MainWindow(Window):
 		self.hideonclose = False
 
 		self.preferences = ConfigManager.preferences['GtkInterface']
-		self.preferences.define(
-			toggle_on_ctrlspace=Boolean(False),
-			remove_links_on_delete=Boolean(True),
-			always_use_last_cursor_pos=Boolean(True),
-		)
+		self.preferences.define({p[0]: Boolean(p[-1]) for p in ui_preferences})
 		self.preferences.connect('changed', self.do_preferences_changed)
-
-		self.maximized = False
-		self.isfullscreen = False
-		self.connect_after('window-state-event', self.__class__.on_window_state_event)
 
 		# Hidden setting to force the gtk bell off. Otherwise it
 		# can bell every time you reach the begin or end of the text
@@ -194,8 +474,6 @@ class MainWindow(Window):
 		self.uistate.setdefault('windowsize', (600, 450), check=value_is_coord)
 		self.uistate.setdefault('windowmaximized', False)
 		self.uistate.setdefault('active_tabs', None, tuple)
-		self.uistate.setdefault('show_toolbar', True)
-		self.uistate.setdefault('show_statusbar', True)
 		self.uistate.setdefault('readonly', False)
 
 		self.history = History(notebook, notebook.state)
@@ -206,62 +484,18 @@ class MainWindow(Window):
 		<ui>
 			<menubar name="menubar">
 			</menubar>
-			<toolbar name="toolbar">
-			</toolbar>
 		</ui>
 		''')
 
-		# setup menubar and toolbar
+		# setup menubar
 		self.add_accel_group(self.uimanager.get_accel_group())
 		self.menubar = self.uimanager.get_widget('/menubar')
-		self.toolbar = self.uimanager.get_widget('/toolbar')
-		self.toolbar.connect('popup-context-menu', self.do_toolbar_popup)
-		self.add_bar(self.menubar)
-		self.add_bar(self.toolbar)
+		self.add_bar(self.menubar, position=TOP)
 
-		self.pageview = PageView(self.notebook, self.navigation)
-		self.connect_object('readonly-changed', PageView.set_readonly, self.pageview)
-		self.pageview.connect_after(
-			'textstyle-changed', self.on_textview_textstyle_changed)
-		self.pageview.textview.connect_after(
-			'toggle-overwrite', self.on_textview_toggle_overwrite)
-		self.pageview.textview.connect('link-enter', self.on_link_enter)
-		self.pageview.textview.connect('link-leave', self.on_link_leave)
+		self.pageview = NotebookView(self.notebook, self.navigation)
+		self.connect_object('readonly-changed', NotebookView.set_readonly, self.pageview)
 
 		self.add(self.pageview)
-
-		# create statusbar
-		self.statusbar = Gtk.Statusbar()
-		self.statusbar.push(0, '<page>')
-		self.add_bar(self.statusbar, start=False)
-		self.statusbar.set_property('margin', 0)
-		self.statusbar.set_property('spacing', 0)
-
-		def statusbar_element(string, size):
-			frame = Gtk.Frame()
-			frame.set_shadow_type(Gtk.ShadowType.NONE)
-			self.statusbar.pack_end(frame, False, True, 0)
-			label = Gtk.Label(label=string)
-			label.set_size_request(size, 10)
-			label.set_alignment(0.1, 0.5)
-			frame.add(label)
-			return label
-
-		# specify statusbar elements right-to-left
-		self.statusbar_insert_label = statusbar_element('INS', 60)
-		self.statusbar_style_label = statusbar_element('<style>', 110)
-
-		# and build the widget for backlinks
-		self.statusbar_backlinks_button = \
-			BackLinksMenuButton(self.notebook, self.open_page, status_bar_style=True)
-		frame = Gtk.Frame()
-		frame.set_shadow_type(Gtk.ShadowType.NONE)
-		self.statusbar.pack_end(Gtk.Separator(), False, True, 0)
-		self.statusbar.pack_end(frame, False, True, 0)
-		self.statusbar.pack_end(Gtk.Separator(), False, True, 0)
-		frame.add(self.statusbar_backlinks_button)
-
-		self.move_bottom_minimized_tabs_to_statusbar(self.statusbar)
 
 		self.do_preferences_changed()
 
@@ -282,6 +516,7 @@ class MainWindow(Window):
 
 		# Finish uimanager
 		self._uiactions = UIActions(self, self.notebook, self.page, self.navigation)
+		self.__zim_extension_objects__.append(self._uiactions) # HACK to make actions discoverable
 		group = get_gtk_actiongroup(self._uiactions)
 		self.uimanager.insert_action_group(group, 0)
 
@@ -289,19 +524,26 @@ class MainWindow(Window):
 		self.uimanager.insert_action_group(group, 0)
 
 		group = get_gtk_actiongroup(self)
-		# don't use mnemonics on macOS to allow alt-<letter> shortcuts
-		global MENU_ACTIONS
-		if sys.platform == "darwin":
-			MENU_ACTIONS = tuple((t[0], t[1], t[2].replace('_', '')) for t in MENU_ACTIONS)
 		group.add_actions(MENU_ACTIONS)
 		self.uimanager.insert_action_group(group, 0)
 
-		group.get_action('open_page_back').set_sensitive(False)
-		group.get_action('open_page_forward').set_sensitive(False)
+		self.open_page_back.set_sensitive(False)
+		self.open_page_forward.set_sensitive(False)
 
 		fname = 'menubar.xml'
 		self.uimanager.add_ui_from_string(data_file(fname).read())
-		self.pageview.emit('ui-init') # Needs to trigger after default menus are build
+
+		# header & tool bars
+		if self.preferences['show_headerbar']:
+			self._headerbar = Gtk.HeaderBar()
+			self._headerbar.set_show_close_button(True)
+			self.set_titlebar(self._headerbar)
+		else:
+			self._headerbar = None
+
+		self._init_fullscreen_headerbar()
+		self._populate_headerbars()
+		self._init_toolbar()
 
 		# Do this last, else menu items show up in wrong place
 		self._customtools = CustomToolManagerUI(self.uimanager, self.pageview)
@@ -339,7 +581,56 @@ class MainWindow(Window):
 		else:
 			self.open_page_home()
 
+		PluginManager.register_new_extendable(self.pageview)
+		initialize_actiongroup(self, 'win')
+
 		self.pageview.grab_focus()
+
+	def _populate_headerbar(self, headerbar):
+		hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+		for action in (
+			self.open_page_back,
+			self.open_page_home,
+			self.open_page_forward,
+		):
+			hbox.add(action.create_icon_button())
+		context = hbox.get_style_context()
+		context.add_class("linked")
+		headerbar.pack_start(hbox)
+
+		headerbar.pack_end(self._uiactions.show_search.create_icon_button())
+
+		button = self.toggle_editable.create_icon_button()
+		self._style_toggle_editable_button(button)
+		headerbar.pack_end(button)
+
+	def _populate_toolbar(self, toolbar):
+		# Add default controls
+		if not self.preferences['show_headerbar']:
+			for action in (
+				self.open_page_back,
+				self.open_page_home,
+				self.open_page_forward,
+			):
+				toolbar.insert(action.create_tool_button(), -1)
+			toolbar.insert(Gtk.SeparatorToolItem(), -1)
+
+			item = self.toggle_editable.create_tool_button(connect_button=False)
+			item.set_action_name('win.toggle_editable')
+			self._style_toggle_editable_button(item)
+			toolbar.insert(item, -1)
+			toolbar.insert(Gtk.SeparatorToolItem(), -1)
+
+			self._populate_toolbar_inner(toolbar)
+
+			space = Gtk.SeparatorToolItem()
+			space.set_draw(False)
+			space.set_expand(True)
+			toolbar.insert(space, -1)
+
+			toolbar.insert(self._uiactions.show_search.create_tool_button(), -1)
+		else:
+			self._populate_toolbar_inner(toolbar)
 
 	@action(_('_Close'), '<Primary>W') # T: Menu item
 	def close(self):
@@ -361,7 +652,6 @@ class MainWindow(Window):
 		self.pageview.save_changes()
 		if self.page.modified:
 			return # Do not quit if page not saved
-		self.pageview.page.set_ui_object(None) # XXX
 
 		self._do_close()
 
@@ -374,30 +664,6 @@ class MainWindow(Window):
 			op.wait()
 
 		Window.destroy(self) # gtk destroy & will also emit destroy signal
-
-	def do_update_statusbar(self, *a):
-		page = self.pageview.get_page()
-		if not page:
-			return
-		label = page.name
-		if page.modified:
-			label += '*'
-		if self.notebook.readonly or page.readonly:
-			label += ' [' + _('readonly') + ']' # T: page status in statusbar
-		self.statusbar.pop(0)
-		self.statusbar.push(0, label)
-
-	def on_window_state_event(self, event):
-		if bool(event.changed_mask & Gdk.WindowState.MAXIMIZED):
-			self.maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
-
-		if bool(event.changed_mask & Gdk.WindowState.FULLSCREEN):
-			self.isfullscreen = bool(event.new_window_state & Gdk.WindowState.FULLSCREEN)
-			self.__class__.toggle_fullscreen.set_toggleaction_state(self, self.isfullscreen)
-
-		if bool(event.changed_mask & Gdk.WindowState.MAXIMIZED) \
-			or bool(event.changed_mask & Gdk.WindowState.FULLSCREEN):
-				schedule_on_idle(lambda: self.pageview.scroll_cursor_on_screen())
 
 	def do_preferences_changed(self, *a):
 		if self._switch_focus_accelgroup:
@@ -413,17 +679,27 @@ class MainWindow(Window):
 			# see bug lp:620315)
 			group.connect( # <Alt><Space>
 				space, Gdk.ModifierType.MOD1_MASK, Gtk.AccelFlags.VISIBLE,
-				self.toggle_sidepane_focus)
+				self.do_focus_sidepane_key_toggle)
 
 		# Toggled by preference menu, also causes issues with international
 		# layouts - esp. when switching input method on Meta-Space
 		if self.preferences['toggle_on_ctrlspace']:
 			group.connect( # <Primary><Space>
 				space, PRIMARY_MODIFIER_MASK, Gtk.AccelFlags.VISIBLE,
-				self.toggle_sidepane_focus)
+				self.do_focus_sidepane_key_toggle)
 
 		self.add_accel_group(group)
 		self._switch_focus_accelgroup = group
+
+		# Toggle dark theme
+		gtk_settings = Gtk.Settings.get_default()
+		text_style = ConfigManager.get_config_dict('style.conf')
+		if self.preferences['prefer-dark-theme']:
+			gtk_settings.set_property('gtk-application-prefer-dark-theme', True)
+			text_style.set_selectors(('darktheme',))
+		else:
+			gtk_settings.set_property('gtk-application-prefer-dark-theme', False)
+			text_style.set_selectors(None)
 
 	@toggle_action(_('Menubar'), init=True) # T: label for View->Menubar menu item
 	def toggle_menubar(self, show):
@@ -437,168 +713,6 @@ class MainWindow(Window):
 		else:
 			self.menubar.hide()
 			self.menubar.set_no_show_all(True)
-
-	@toggle_action(_('_Toolbar'), init=True) # T: Menu item
-	def toggle_toolbar(self, show):
-		'''Menu action to toggle the visibility of the tool bar'''
-		if show:
-			self.toolbar.set_no_show_all(False)
-			self.toolbar.show()
-		else:
-			self.toolbar.hide()
-			self.toolbar.set_no_show_all(True)
-
-		self.uistate['show_toolbar'] = show
-
-	def do_toolbar_popup(self, toolbar, x, y, button):
-		'''Show the context menu for the toolbar'''
-		menu = self.uimanager.get_widget('/toolbar_popup')
-		gtk_popup_at_pointer(menu)
-
-	@toggle_action(_('_Statusbar'), init=True) # T: Menu item
-	def toggle_statusbar(self, show):
-		'''Menu action to toggle the visibility of the status bar'''
-		if show:
-			self.statusbar.set_no_show_all(False)
-			self.statusbar.show()
-		else:
-			self.statusbar.hide()
-			self.statusbar.set_no_show_all(True)
-
-		self.uistate['show_statusbar'] = show
-
-	@toggle_action(_('_Fullscreen'), 'F11', icon='gtk-fullscreen', init=False) # T: Menu item
-	def toggle_fullscreen(self, show):
-		'''Menu action to toggle the fullscreen state of the window'''
-		if show:
-			self.fullscreen()
-		else:
-			self.unfullscreen()
-
-	def do_pane_state_changed(self, pane, *a):
-		if not hasattr(self, 'actiongroup') \
-		or self._block_toggle_panes:
-			return
-
-		action = self.actiongroup.get_action('toggle_panes')
-		visible = bool(self.get_visible_panes())
-		if visible != action.get_active():
-			action.set_active(visible)
-
-	@toggle_action(_('_Side Panes'), 'F9', icon='gtk-index', init=True) # T: Menu item
-	def toggle_panes(self, show):
-		'''Menu action to toggle the visibility of the all panes
-		@param show: when C{True} or C{False} force the visibility,
-		when C{None} toggle based on current state
-		'''
-		self._block_toggle_panes = True
-		Window.toggle_panes(self, show)
-		self._block_toggle_panes = False
-
-		if show:
-			self.focus_sidepane()
-		else:
-			self.pageview.grab_focus()
-
-		self._sidepane_autoclose = False
-		self.save_uistate()
-
-	def do_set_focus(self, widget):
-		Window.do_set_focus(self, widget)
-		if widget == self.pageview.textview \
-		and self._sidepane_autoclose:
-			# Sidepane open and should close automatically
-			self.toggle_panes(False)
-
-	def toggle_sidepane_focus(self, *a):
-		'''Switch focus between the textview and the page index.
-		Automatically opens the sidepane if it is closed
-		(but sets a property to automatically close it again).
-		This method is used for the (optional) <Primary><Space> keybinding.
-		'''
-		action = self.actiongroup.get_action('toggle_panes')
-		if action.get_active():
-			# side pane open
-			if self.pageview.textview.is_focus():
-				self.focus_sidepane()
-			else:
-				if self._sidepane_autoclose:
-					self.toggle_panes(False)
-				else:
-					self.pageview.grab_focus()
-		else:
-			# open the pane
-			self.toggle_panes(True)
-			self._sidepane_autoclose = True
-
-		return True # stop
-
-	@radio_action(
-		None,
-		radio_option(TOOLBAR_ICONS_AND_TEXT, _('Icons _And Text')), # T: Menu item
-		radio_option(TOOLBAR_ICONS_ONLY, _('_Icons Only')), # T: Menu item
-		radio_option(TOOLBAR_TEXT_ONLY, _('_Text Only')), # T: Menu item
-	)
-	def set_toolbar_style(self, style):
-		'''Set the toolbar style
-		@param style: can be either:
-			- C{TOOLBAR_ICONS_AND_TEXT}
-			- C{TOOLBAR_ICONS_ONLY}
-			- C{TOOLBAR_TEXT_ONLY}
-		'''
-		if style == TOOLBAR_ICONS_AND_TEXT:
-			self.toolbar.set_style(Gtk.ToolbarStyle.BOTH)
-		elif style == TOOLBAR_ICONS_ONLY:
-			self.toolbar.set_style(Gtk.ToolbarStyle.ICONS)
-		elif style == TOOLBAR_TEXT_ONLY:
-			self.toolbar.set_style(Gtk.ToolbarStyle.TEXT)
-		else:
-			assert False, 'BUG: Unkown toolbar style: %s' % style
-
-		self.preferences['toolbar_style'] = style
-
-	@radio_action(
-		None,
-		radio_option(TOOLBAR_ICONS_LARGE, _('_Large Icons')), # T: Menu item
-		radio_option(TOOLBAR_ICONS_SMALL, _('_Small Icons')), # T: Menu item
-		radio_option(TOOLBAR_ICONS_TINY, _('_Tiny Icons')), # T: Menu item
-	)
-	def set_toolbar_icon_size(self, size):
-		'''Set the toolbar style
-		@param size: can be either:
-			- C{TOOLBAR_ICONS_LARGE}
-			- C{TOOLBAR_ICONS_SMALL}
-			- C{TOOLBAR_ICONS_TINY}
-		'''
-		if size == TOOLBAR_ICONS_LARGE:
-			self.toolbar.set_icon_size(Gtk.IconSize.LARGE_TOOLBAR)
-		elif size == TOOLBAR_ICONS_SMALL:
-			self.toolbar.set_icon_size(Gtk.IconSize.SMALL_TOOLBAR)
-		elif size == TOOLBAR_ICONS_TINY:
-			self.toolbar.set_icon_size(Gtk.IconSize.MENU)
-		else:
-			assert False, 'BUG: Unkown toolbar size: %s' % size
-
-		self.preferences['toolbar_size'] = size
-
-	@toggle_action(_('Notebook _Editable'), icon='gtk-edit', init=True) # T: menu item
-	def toggle_editable(self, editable):
-		'''Menu action to toggle the read-only state of the application
-		@emits: readonly-changed
-		'''
-		readonly = not editable
-		if readonly and self.page and self.page.modified:
-			# Save any modification now - will not be allowed after switch
-			self.pageview.save_changes()
-
-		for group in self.uimanager.get_action_groups():
-			for action in group.list_actions():
-				if hasattr(action, 'zim_readonly') \
-				and not action.zim_readonly:
-					action.set_sensitive(not readonly)
-
-		self.uistate['readonly'] = readonly
-		self.emit('readonly-changed', readonly)
 
 	def init_uistate(self):
 		# Initialize all the uistate parameters
@@ -618,41 +732,13 @@ class MainWindow(Window):
 			if self.uistate['windowmaximized']:
 				self.maximize()
 
-		# For these two "None" means system default, but we don't know what that default is :(
-		self.preferences.setdefault('toolbar_style', None,
-			(TOOLBAR_ICONS_ONLY, TOOLBAR_ICONS_AND_TEXT, TOOLBAR_TEXT_ONLY))
-		self.preferences.setdefault('toolbar_size', None,
-			(TOOLBAR_ICONS_TINY, TOOLBAR_ICONS_SMALL, TOOLBAR_ICONS_LARGE))
-
-		self.toggle_toolbar(self.uistate['show_toolbar'])
-		self.toggle_statusbar(self.uistate['show_statusbar'])
-
 		Window.init_uistate(self) # takes care of sidepane positions etc
 
-		if self.preferences['toolbar_style'] is not None:
-			self.set_toolbar_style(self.preferences['toolbar_style'])
-
-		if self.preferences['toolbar_size'] is not None:
-			self.set_toolbar_icon_size(self.preferences['toolbar_size'])
-
 		self.toggle_fullscreen(self._set_fullscreen)
-
-		if self.notebook.readonly:
-			self.toggle_editable(False)
-			action = self.actiongroup.get_action('toggle_editable')
-			action.set_sensitive(False)
-		else:
-			self.toggle_editable(not self.uistate['readonly'])
 
 		# And hook to notebook properties
 		self.on_notebook_properties_changed(self.notebook.properties)
 		self.notebook.properties.connect('changed', self.on_notebook_properties_changed)
-
-		# Hook up the statusbar
-		self.connect('page-changed', self.do_update_statusbar)
-		self.connect('readonly-changed', self.do_update_statusbar)
-		self.pageview.connect('modified-changed', self.do_update_statusbar)
-		self.notebook.connect_after('stored-page', self.do_update_statusbar)
 
 		# Notify plugins
 		self.emit('init-uistate')
@@ -661,26 +747,6 @@ class MainWindow(Window):
 		self.uimanager.ensure_update()
 			# Prevent flashing when the toolbar is loaded after showing the window
 			# and do this before connecting signal below for accelmap.
-
-		# Add search bar onec toolbar is loaded
-		space = Gtk.SeparatorToolItem()
-		space.set_draw(False)
-		space.set_expand(True)
-		self.toolbar.insert(space, -1)
-
-		from zim.gui.widgets import InputEntry
-		entry = InputEntry(placeholder_text=_('Search'))
-		entry.set_icon_from_stock(Gtk.EntryIconPosition.SECONDARY, Gtk.STOCK_FIND)
-		entry.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, True)
-		entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, _('Search Pages...'))
-			# T: label in search entry
-		inline_search = lambda e, *a: self._uiactions.show_search(query=e.get_text() or None)
-		entry.connect('activate', inline_search)
-		entry.connect('icon-release', inline_search)
-		entry.show()
-		item = Gtk.ToolItem()
-		item.add(entry)
-		self.toolbar.insert(item, -1)
 
 		# Load accelmap config and setup saving it
 		# TODO - this probably belongs in the application class, not here
@@ -695,9 +761,16 @@ class MainWindow(Window):
 
 		Gtk.AccelMap.get().connect('changed', on_accel_map_changed)
 
-		self.do_update_statusbar()
-
 	def save_uistate(self):
+		if not self.pageview._zim_extendable_registered:
+			return
+			# Not allowed to save before plugins are loaded, could overwrite
+			# pane state based on empty panes
+
+		cursor = self.pageview.get_cursor_pos()
+		scroll = self.pageview.get_scroll_pos()
+		self.history.set_state(self.page, cursor, scroll)
+
 		if self.is_visible() and not self.isfullscreen:
 			self.uistate['windowpos'] = tuple(self.get_position())
 			self.uistate['windowsize'] = tuple(self.get_size())
@@ -709,30 +782,12 @@ class MainWindow(Window):
 			self.notebook.state.write()
 
 	def on_notebook_properties_changed(self, properties):
-		self.set_title(self.notebook.name + ' - Zim')
+		self._update_window_title()
 		if self.notebook.icon:
 			try:
 				self.set_icon_from_file(self.notebook.icon)
 			except (GObject.GError, GLib.Error):
 				logger.exception('Could not load icon %s', self.notebook.icon)
-
-	def on_textview_toggle_overwrite(self, view):
-		state = view.get_overwrite()
-		if state:
-			text = 'OVR'
-		else:
-			text = 'INS'
-		self.statusbar_insert_label.set_text(text)
-
-	def on_textview_textstyle_changed(self, view, styles):
-		label = ", ".join([s.title() for s in styles if s]) if styles else 'None'
-		self.statusbar_style_label.set_text(label)
-
-	def on_link_enter(self, view, link):
-		self.statusbar.push(1, 'Go to "%s"' % link['href'])
-
-	def on_link_leave(self, view, link):
-		self.statusbar.pop(1)
 
 	def do_button_press_event(self, event):
 		## Try to capture buttons for navigation
@@ -745,7 +800,7 @@ class MainWindow(Window):
 				logger.debug("Unused mouse button %i", event.button)
 		#~ return Window.do_button_press_event(self, event)
 
-	def open_page(self, path):
+	def open_page(self, path, anchor=None, anchor_fail_silent=False):
 		'''Method to open a page in the mainwindow, and menu action for
 		the "jump to" menu item.
 
@@ -754,29 +809,34 @@ class MainWindow(Window):
 		fails). Check return value for success if you want to be sure.
 
 		@param path: a L{path} for the page to open.
+		@param anchor: name of an anchor (optional)
 		@raises PageNotFound: if C{path} can not be opened
 		@emits: page-changed
 		@returns: C{True} for success
 		'''
 		assert isinstance(path, Path)
-		if isinstance(path, Page) and path.valid:
-			page = path
-		else:
+		try:
 			page = self.notebook.get_page(path) # can raise
+		except PageNotAvailableError as error:
+			# Same code in NewPageDialog
+			if QuestionDialog(self, (
+				_('File exists, do you want to import?'), # T: short question on open-page if file exists
+				_('The file "%s" exists but is not a wiki page.\nDo you want to import it?') % error.file.basename # T: longer question on open-page if file exists
+			)).run():
+				from zim.import_files import import_file
+				page = import_file(error.file, self.notebook, path)
+			else:
+				return # user cancelled
 
 		if self.page and id(self.page) == id(page):
-			# XXX: Check ID to enable reload_page but catch all other
-			# redundant calls.
+			if anchor:
+				self.pageview.navigate_to_anchor(anchor, fail_silent=anchor_fail_silent)
 			return
 		elif self.page:
 			self.pageview.save_changes() # XXX - should connect to signal instead of call here
 			self.notebook.wait_for_store_page_async() # XXX - should not be needed - hide in notebook/page class - how?
 			if self.page.modified:
 				return False # Assume SavePageErrorDialog was shown and cancelled
-
-			old_cursor = self.pageview.get_cursor_pos()
-			old_scroll = self.pageview.get_scroll_pos()
-			self.history.set_state(self.page, old_cursor, old_scroll)
 
 			self.save_uistate()
 
@@ -797,19 +857,35 @@ class MainWindow(Window):
 			cursor = None
 
 		if cursor is None and self.preferences['always_use_last_cursor_pos']:
-			cursor, _ = self.history.get_state(page)
+			cursor, x = self.history.get_state(page)
 
 		self.pageview.set_page(page, cursor)
+
+		if anchor:
+			self.pageview.navigate_to_anchor(anchor, fail_silent=anchor_fail_silent)
 
 		self.emit('page-changed', page)
 
 		self.pageview.grab_focus()
 
 	def do_page_changed(self, page):
-		#TODO: set toggle_editable() insensitive when page is readonly
 		self.update_buttons_history()
 		self.update_buttons_hierarchy()
-		self.statusbar_backlinks_button.set_page(self.page)
+		self._update_window_title()
+		self.set_toggle_editable_state(not self.uistate['readonly'])
+
+	def _update_window_title(self):
+		if self.notebook.readonly or (self.page and self.page.readonly):
+			readonly = ' [' + _('readonly') + ']' # T: page status for title bar
+		else:
+			readonly = ''
+
+		if self.page:
+			title = self.page.name + ' - ' + self.notebook.name + readonly
+		else:
+			title = self.notebook.name + readonly
+
+		self.set_title(title)
 
 	def do_page_info_changed(self, notebook, page):
 		if page == self.page:
@@ -817,32 +893,25 @@ class MainWindow(Window):
 
 	def update_buttons_history(self):
 		historyrecord = self.history.get_current()
-
-		back = self.actiongroup.get_action('open_page_back')
-		back.set_sensitive(not historyrecord.is_first)
-
-		forward = self.actiongroup.get_action('open_page_forward')
-		forward.set_sensitive(not historyrecord.is_last)
+		self.open_page_back.set_sensitive(not historyrecord.is_first)
+		self.open_page_forward.set_sensitive(not historyrecord.is_last)
 
 	def update_buttons_hierarchy(self):
-		parent = self.actiongroup.get_action('open_page_parent')
-		child = self.actiongroup.get_action('open_page_child')
-		parent.set_sensitive(len(self.page.namespace) > 0)
-		child.set_sensitive(self.page.haschildren)
+		self.open_page_parent.set_sensitive(len(self.page.namespace) > 0)
+		self.open_page_child.set_sensitive(self.page.haschildren)
 
-		previous = self.actiongroup.get_action('open_page_previous')
-		next = self.actiongroup.get_action('open_page_next')
 		has_prev, has_next = self.notebook.pages.get_has_previous_has_next(self.page)
-		previous.set_sensitive(has_prev)
-		next.set_sensitive(has_next)
+		self.open_page_previous.set_sensitive(has_prev)
+		self.open_page_next.set_sensitive(has_next)
 
 	@action(_('_Jump To...'), '<Primary>J') # T: Menu item
 	def show_jump_to(self):
 		return OpenPageDialog(self, self.page, self.open_page).run()
 
 	@action(
-		_('_Back'), verb_icon='gtk-go-back', # T: Menu item
-		accelerator='<alt>Left', alt_accelerator='XF86Back'
+		_('_Back'), verb_icon='go-previous-symbolic', # T: Menu item
+		accelerator='<alt>Left', alt_accelerator='XF86Back',
+		tooltip=_('Go back') # T: tooltip for navigation button
 	)
 	def open_page_back(self):
 		'''Menu action to open the previous page from the history
@@ -853,8 +922,9 @@ class MainWindow(Window):
 			self.open_page(record)
 
 	@action(
-		_('_Forward'), verb_icon='gtk-go-forward', # T: Menu item
-		accelerator='<alt>Right', alt_accelerator='XF86Forward'
+		_('_Forward'), verb_icon='go-next-symbolic', # T: Menu item
+		accelerator='<alt>Right', alt_accelerator='XF86Forward',
+		tooltip=_('Go forward') # T: tooltip for navigation button
 	)
 	def open_page_forward(self):
 		'''Menu action to open the next page from the history
@@ -889,7 +959,7 @@ class MainWindow(Window):
 				child = self.notebook.pages.get_next(path)
 				self.open_page(child)
 
-	@action(_('_Previous in index'), accelerator='<alt>Page_Up') # T: Menu item
+	@action(_('_Previous in Index'), accelerator='<alt>Page_Up') # T: Menu item
 	def open_page_previous(self):
 		'''Menu action to open the previous page from the index
 		@returns: C{True} if successfull
@@ -898,7 +968,7 @@ class MainWindow(Window):
 		if not path is None:
 			self.open_page(path)
 
-	@action(_('_Next in index'), accelerator='<alt>Page_Down') # T: Menu item
+	@action(_('_Next in Index'), accelerator='<alt>Page_Down') # T: Menu item
 	def open_page_next(self):
 		'''Menu action to open the next page from the index
 		@returns: C{True} if successfull
@@ -907,22 +977,10 @@ class MainWindow(Window):
 		if not path is None:
 			self.open_page(path)
 
-	@action(_('_Home'), '<alt>Home', icon='gtk-home') # T: Menu item
+	@action(_('_Home'), '<alt>Home', verb_icon='go-home-symbolic', tooltip=_('Go to home page')) # T: Menu item
 	def open_page_home(self):
 		'''Menu action to open the home page'''
 		self.open_page(self.notebook.get_home_page())
-
-	@action(_('_Reload'), '<Primary>R') # T: Menu item
-	def reload_page(self):
-		'''Menu action to reload the current page. Will first try
-		to save any unsaved changes, then reload the page from disk.
-		'''
-		# TODO: this is depending on behavior of open_page(), should be more robust
-		pos = self.pageview.get_cursor_pos()
-		self.pageview.save_changes() # XXX
-		self.notebook.flush_page_cache(self.page)
-		if self.open_page(self.notebook.get_page(self.page)):
-			self.pageview.set_cursor_pos(pos)
 
 
 class BackLinksMenuButton(MenuButton):
@@ -962,38 +1020,145 @@ class BackLinksMenuButton(MenuButton):
 		MenuButton.popup_menu(self, event)
 
 
-class PageWindow(Window):
-	'''Secondary window, showing a single page'''
+class PageWindow(WindowBaseMixin, Window):
+	'''Window to show a single page'''
 
-	def __init__(self, notebook, page, navigation):
+	# define signals we want to use - (closure type, return type and arg types)
+	__gsignals__ = {
+		'readonly-changed': (GObject.SignalFlags.RUN_LAST, None, (bool,)),
+	}
+
+	def __init__(self, notebook, page, navigation, editable=True):
 		Window.__init__(self)
+		self._block_toggle_panes = False
+		self._sidepane_autoclose = False
 		self.navigation = navigation
 		self.notebook = notebook
+		self.page = notebook.get_page(page)
 
-		self.set_title(page.name + ' - Zim')
+		self.preferences = ConfigManager.preferences['GtkInterface']
+		self.preferences.define({p[0]: Boolean(p[-1]) for p in ui_preferences})
+		#self.preferences.connect('changed', self.do_preferences_changed)
+
+		if self.preferences['show_headerbar']:
+			self._headerbar = Gtk.HeaderBar()
+			self._headerbar.set_show_close_button(True)
+			self.set_titlebar(self._headerbar)
+		else:
+			self._headerbar = None
+
+		self._init_fullscreen_headerbar()
+		self._populate_headerbars()
+
+		if self.notebook.readonly or self.page.readonly:
+			title = page.name + ' [' + _('readonly') + ']' # T: page status for title bar
+		else:
+			title = page.name
+		self.set_title(title)
 		#if ui.notebook.icon:
 		#	try:
 		#		self.set_icon_from_file(ui.notebook.icon)
 		#	except (GObject.GError, GLib.Error):
 		#		logger.exception('Could not load icon %s', ui.notebook.icon)
 
-		page = notebook.get_page(page)
 
 		self.uistate = notebook.state['PageWindow']
 		self.uistate.setdefault('windowsize', (500, 400), check=value_is_coord)
 		w, h = self.uistate['windowsize']
 		self.set_default_size(w, h)
 
-		self.pageview = PageView(notebook, navigation, secondary=True)
-		self.pageview.set_page(page)
+		self.pageview = PageView(notebook, navigation)
+		self.connect_object('readonly-changed', PageView.set_readonly, self.pageview)
+		self.pageview.set_page(self.page)
 		self.add(self.pageview)
 
+		# Need UIManager & menubar to make accelerators and plugin actions work
+		self.uimanager = Gtk.UIManager()
+		self.add_accel_group(self.uimanager.get_accel_group())
 
+		group = get_gtk_actiongroup(self)
+		group.add_actions(MENU_ACTIONS)
+		self.uimanager.insert_action_group(group, 0)
+
+		group = get_gtk_actiongroup(self.pageview)
+		self.uimanager.insert_action_group(group, 0)
+
+		self._uiactions = UIActions(self, self.notebook, self.page, self.navigation)
+		group = get_gtk_actiongroup(self._uiactions)
+		self.uimanager.insert_action_group(group, 0)
+
+		fname = 'pagewindow_ui.xml'
+		self.uimanager.add_ui_from_string(data_file(fname).read())
+
+		self.menubar = self.uimanager.get_widget('/menubar')
+		self.add_bar(self.menubar, position=TOP)
+
+		self._init_toolbar()
+
+		# Close window when page is moved or deleted
+		def on_notebook_change(o, path, *a):
+			if path == self.page or self.page.ischild(path):
+				logger.debug('Close PageWindow for %s (page is gone)', self.page)
+				self.save_uistate()
+				self.destroy()
+
+		notebook.connect('deleted-page', on_notebook_change)
+		notebook.connect('moved-page', on_notebook_change)
+
+		# setup state
+		self.set_toggle_editable_state(editable)
+
+		# on close window
 		def do_delete_event(*a):
-			logger.debug('Close PageWindow for %s', page)
-			self.uistate['windowsize'] = tuple(self.get_size())
+			logger.debug('Close PageWindow for %s', self.page)
+			self.save_uistate()
 
 		self.connect('delete-event', do_delete_event)
+
+		PluginManager.register_new_extendable(self.pageview)
+		initialize_actiongroup(self, 'win')
+
+		self.pageview.grab_focus()
+
+	def _populate_headerbar(self, headerbar):
+		#if headerbar is self._headerbar:
+		#	headerbar.pack_end(self.toggle_fullscreen.create_icon_button()) # FIXME: should go in menu popover
+
+		button = self.toggle_editable.create_icon_button()
+		self._style_toggle_editable_button(button)
+		headerbar.pack_end(button)
+
+	def _populate_toolbar(self, toolbar):
+		# Add default controls
+		if not self.preferences['show_headerbar']:
+			item = self.toggle_editable.create_tool_button(connect_button=False)
+			item.set_action_name('win.toggle_editable')
+			self._style_toggle_editable_button(item)
+			toolbar.insert(item, -1)
+			toolbar.insert(Gtk.SeparatorToolItem(), -1)
+
+			self._populate_toolbar_inner(toolbar)
+
+			space = Gtk.SeparatorToolItem()
+			space.set_draw(False)
+			space.set_expand(True)
+			toolbar.insert(space, -1)
+
+			# FIXME: should go in menu popover
+			#item = self.toggle_fullscreen.create_tool_button(connect_button=False)
+			#item.set_action_name('win.toggle_fullscreen')
+			#toolbar.insert(item, -1)
+		else:
+			self._populate_toolbar_inner(toolbar)
+
+	def save_uistate(self):
+		if not self.pageview._zim_extendable_registered:
+			return
+			# Not allowed to save before plugins are loaded, could overwrite
+			# pane state based on empty panes
+		self.uistate['windowsize'] = tuple(self.get_size())
+		Window.save_uistate(self) # takes care of sidepane positions etc.
+
 
 class OpenPageDialog(Dialog):
 	'''Dialog to go to a specific page. Also known as the "Jump to" dialog.

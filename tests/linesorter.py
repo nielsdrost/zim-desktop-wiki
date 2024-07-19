@@ -7,12 +7,13 @@
 import tests
 
 from tests.mainwindow import setUpMainWindow
+from tests.pageview import TextBufferTestCaseMixin
 
 from zim.plugins.linesorter import LineSorterPlugin, LineSorterPageViewExtension, NoSelectionError
 from zim.gui.pageview import PageView
 
 
-class TestLineSorterWindowExtension(tests.TestCase):
+class TestLineSorterWindowExtension(tests.TestCase, TextBufferTestCaseMixin):
 
 	def setUp(self):
 		plugin = LineSorterPlugin()
@@ -58,7 +59,7 @@ class TestLineSorterWindowExtension(tests.TestCase):
 		from zim.formats import ParseTree
 		template = '<?xml version=\'1.0\' encoding=\'utf-8\'?>\n<zim-tree><p><ul>%s</ul></p></zim-tree>'
 		tree = ParseTree().fromstring(
-			template % '<li>B list item</li><li>C list item</li><li>A list item</li>'
+			template % '<li>B list item\n</li><li>C list item\n</li><li>A list item\n</li>'
 		)
 		self.buffer.set_parsetree(tree)
 		self.select_range(0, 42)
@@ -66,7 +67,7 @@ class TestLineSorterWindowExtension(tests.TestCase):
 		tree = self.buffer.get_parsetree()
 		self.assertEqual(
 			tree.tostring(),
-			template % '<li bullet="*">A list item</li><li bullet="*">B list item</li><li bullet="*">C list item</li>'
+			template % '<li bullet="*">A list item\n</li><li bullet="*">B list item\n</li><li bullet="*">C list item\n</li>'
 		)
 
 	def testErrorForSortLinesIfNoSelection(self):
@@ -140,6 +141,18 @@ class TestLineSorterWindowExtension(tests.TestCase):
 		self.extension.move_line_down()
 		self.assertEqual(self.get_text(), 'A line\nB line\nC line\n')
 
+	def testHandleMissingNewlineAtEndForMoveUp(self):
+		self.set_text('A line\nB line\nC line')
+		self.place_cursor(18)
+		self.extension.move_line_up()
+		self.assertEqual(self.get_text(), 'A line\nC line\nB line\n')
+
+	def testHandleMissingNewlineAtEndForMoveDown(self):
+		self.set_text('A line\nB line\nC line')
+		self.place_cursor(10)
+		self.extension.move_line_down()
+		self.assertEqual(self.get_text(), 'A line\nC line\nB line\n')
+
 	def testDuplicateLine(self):
 		self.set_text('Line A\nLine B\nLine C\n')
 		self.place_cursor(10)
@@ -151,6 +164,26 @@ class TestLineSorterWindowExtension(tests.TestCase):
 		self.select_range(0, 10)
 		self.extension.duplicate_line()
 		self.assertEqual(self.get_text(), 'Line A\nLine B\nLine A\nLine B\nLine C\n')
+
+	def testDuplicateLineAvoidResetHeaderForBullet(self):
+		# Test case for specific issue seen #1457
+		# Effective testing pageview behavior, so might be in the wrong place
+		# in the test suite.
+		# Doubles as test for content other than pure text
+		self.set_buffer(self.buffer, '''\
+<li bullet="*" indent="0"> line A
+</li><li bullet="*" indent="0"> line B
+</li><h level="2">Heading</h>
+''')
+		self.place_cursor(10)
+		self.extension.duplicate_line()
+		self.assertBufferEquals(self.buffer, '''\
+<li bullet="*" indent="0"> line A
+</li><li bullet="*" indent="0"> line B
+</li><li bullet="*" indent="0"> line B
+</li><h level="2">Heading</h>
+'''
+)
 
 	def testRemoveLine(self):
 		self.set_text('Line A\nLine B\nLine C\n')

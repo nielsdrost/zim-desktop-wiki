@@ -7,8 +7,6 @@ import tests
 
 import os
 
-from zim.fs import Dir
-
 from zim.config import ConfigManager
 from zim.notebook import NotebookInfo, get_notebook_list
 
@@ -29,7 +27,7 @@ class TestNotebookComboBox(tests.TestCase):
 			pass
 
 		notebooklist = MyList([
-			NotebookInfo(U('file:///test/foo'), name='Foo'),
+			NotebookInfo(U('file:///test/foo'), name='Foo', icon='./foo.png'),
 			NotebookInfo(U('file:///test/bar'), name='Bar')
 		])
 		notebooklist.default = notebooklist[1]
@@ -67,9 +65,9 @@ class TestNotebookDialog(tests.TestCase):
 		from zim.gui.notebookdialog import prompt_notebook, \
 			AddNotebookDialog, NotebookDialog
 
-		tmpdir = self.create_tmp_dir()
-		dir1 = Dir(tmpdir + '/mynotebook1')
-		dir2 = Dir(tmpdir + '/mynotebook2')
+		tmpdir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		dir1 = tmpdir.folder('mynotebook1')
+		dir2 = tmpdir.folder('mynotebook2')
 
 		# First time we get directly the AddNotebookDialog
 		def doAddNotebook(dialog):

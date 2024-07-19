@@ -10,7 +10,8 @@ import logging
 logger = logging.getLogger('zim.newfs')
 
 
-FS_CASE_SENSITIVE = (os.name != 'nt') #: file system case-sensitive yes or no
+FS_CASE_SENSITIVE = not (os.name == 'nt' or sys.platform == 'darwin') #: file system case-sensitive yes or no
+	# Both windows and mac OS have by default case in-sensitive file systems
 
 FS_SUPPORT_NON_LOCAL_FILE_SHARES = (os.name == 'nt') #: Support \\host\share paths yes or no
 
@@ -20,6 +21,12 @@ from .base import SEP, _EOL, _HOME
 from .local import *
 from .helpers import *
 
+
+# NOTE: key design principle in this module is that we never take relative
+# paths implicitely. Relative paths should always be explicit with the
+# reference path being provided as an object. One reason is that this makes
+# the code more robust and secure by being explicit. Secondly it allows
+# test cases without touching real files, which is in general faster.
 
 # Functions
 # - (relative) pathname manipulation - specifically for links
@@ -53,63 +60,36 @@ from .helpers import *
 # - FSTreeMonitor - monitor internal changes, passes itself as "logger" to children
 
 
-# Key is that we always use objects to signal file vs folder,
-# get rid of all uses of "isdir" because it shows a constructor issue.
-# Instead use "folder.child(path)" to get either file or folder.
-# Also no common FS object, just construct the parent folder first
-#
-# When instatiating you need to use specific LocalFolder or LocalFile
-# this will alert you to the non-mockable nature of the code
-#
-# This also means that folder provide access to children, not parents
-# if a object needs access to larger file system, a root folder
-# should be passed as a requirement to the constructor; else you can
-# not mock the function for testing.
+def localFileOrFolder(path, pwd=None):
+	'''Convenience method that resolves a local C{File} or C{Folder} object
 
-# TODO
-# - test on FAT file system - e.g. USB stick ?
+	If the path is a string and ends with either "/" or "\\" it is interpreted
+	as user input and a C{LocalFolder} object will be returned. Else the function
+	will try to sort out whether the path is a file or a folder by checking on
+	disk. This requires the object to exist.
 
-# TODO - put in helper modules:
-# - trash - optional, only support for local file - separate gui object
-# - monitor with gio - separate gui object
-# - thumbnailer - separate gui object
+	NOTE: for consistency, this function only returns objects for existing files
+	or folders, else it raises C{FileNotFoundError}
 
-# TODO - don't do
-# - lock for fs operations --> checkin / checkout mechanism in notebook, use notebook lock
+	@param path: file path as a string, L{FilePath} object, or list of path elements
+	@param pwd: working directory as a string, needed to allow relative paths
+	'''
+	if pwd:
+		filepath = FilePath(pwd).get_abspath(path)
+	else:
+		filepath = FilePath(path)
 
-# With respect to page interface:
-# Page.source is used for:
-# - StubLinker - export with links to real source
-# - cusomt tools to get commandline arg
-# - edit source command
-# - versioncontrol & zeitgeist logger plugins
-#   --> these are also only one interested in FS signals
-# --> very limitted access needed
-
-# Re checkin//checkout --> only needed for interface editing page
-# implement by setting callbacks that can be called by the notebook
-# before any operation.
-# notebook.checkout(page, callback)
-# notebook.checkin(page)
-# notebook.update_checked_pages()
-#   called automatically by most methods, call explicitly from export
-#
-# by calling all callbacks *before* any action we allow for error dialogs
-# etc before modification - no surprises once running
-# --> Make it a context manager lock to block checkout during operation etc.
-
-
-
-
-
-
-def localFileOrFolder(path):
-	'''Convenience method that resolves a local C{File} or C{Folder} object'''
-	path = FilePath(path)
-	try:
-		return LocalFolder(path.dirname).child(path.basename)
-	except FileNotFoundError:
-		raise FileNotFoundError(path)
+	if isinstance(path, str) and path and path[-1] in ('/', '\\'):
+		folder = LocalFolder(filepath)
+		if folder.exists():
+			return folder
+		else:
+			raise FileNotFoundError(filepath)
+	else:
+		try:
+			return LocalFolder(filepath.dirname).child(filepath.basename)
+		except:
+			raise FileNotFoundError(filepath) # translate parent not found error
 
 
 def cleanup_filename(name):

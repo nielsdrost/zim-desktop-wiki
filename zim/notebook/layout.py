@@ -7,10 +7,10 @@ import sys
 
 from .page import Path
 
-from zim.newfs import File, Folder, _EOL, SEP
+from zim.newfs import File, Folder, _EOL, SEP, FileNotFoundError
 from zim.formats import get_format
 
-import zim.parsing # we use "error=urlencode"
+import zim.parse.links # we use "error=urlencode"
 
 FILE_TYPE_PAGE_SOURCE = 1
 FILE_TYPE_ATTACHMENT = 2
@@ -70,10 +70,7 @@ class FilesLayout(NotebookLayout):
 	like-named file.
 	'''
 
-	default_extension = '.txt'
-	default_format = get_format('wiki')
-
-	def __init__(self, folder, endofline=_EOL):
+	def __init__(self, folder, endofline=_EOL, default_format='wiki', default_extension='.txt'):
 		'''Constructor
 		@param folder: a L{Folder} object
 		@param endofline: either "dos" or "unix", default per OS
@@ -81,6 +78,30 @@ class FilesLayout(NotebookLayout):
 		assert isinstance(folder, Folder)
 		self.root = folder
 		self.endofline = endofline
+
+		if not default_extension.startswith('.'):
+			default_extension = '.' + default_extension
+
+		self.default_extension = default_extension
+		self.default_format = get_format(default_format)
+
+	def is_source_file(self, file):
+		if file.path.endswith(self.default_extension):
+			name = file.basename
+			pname = decode_filename(name)
+			if encode_filename(pname) != name: # will reject e.g. whitespace in file name
+				return False
+
+			if self.default_extension == '.txt':
+				try:
+					line = file.readline(size=50) # max size to allow for some trailing whitespace and end-of-line
+					return line.strip() == 'Content-Type: text/x-zim-wiki'
+				except FileNotFoundError:
+					return True # give file the benefit of the doubt, could be a deleted source file
+			else:
+				return True
+		else:
+			return False
 
 	def map_page(self, pagename):
 		'''Map a pagename to a (default) file
@@ -96,7 +117,7 @@ class FilesLayout(NotebookLayout):
 
 	def get_attachments_folder(self, pagename):
 		file, folder = self.map_page(pagename)
-		return FilesAttachmentFolder(folder, self.default_extension)
+		return FilesAttachmentFolder(folder, self.is_source_file)
 
 	def map_file(self, file):
 		'''Map a filepath to a pagename
@@ -104,26 +125,28 @@ class FilesLayout(NotebookLayout):
 		@returns: a L{Path} and a file type (C{FILE_TYPE_PAGE_SOURCE},
 		F{FILE_TYPE_ATTACHMENT})
 		'''
-		path = file.relpath(self.root)
-		return self.map_filepath(path)
+		type = FILE_TYPE_PAGE_SOURCE if self.is_source_file(file) else FILE_TYPE_ATTACHMENT
 
-	def map_filepath(self, path):
-		'''Like L{map_file} but takes a string with relative path'''
-		if path.endswith(self.default_extension):
-			path = path[:-len(self.default_extension)]
-			type = FILE_TYPE_PAGE_SOURCE
-		else:
+		path = file.relpath(self.root)
+		if type == FILE_TYPE_PAGE_SOURCE:
+			if path.endswith(self.default_extension):
+				path = path[:-len(self.default_extension)]
+		else: # FILE_TYPE_ATTACHMENT
 			if SEP in path:
 				path, x = path.rsplit(SEP, 1)
 			else:
 				path = ':' # ROOT_PATH
-			type = FILE_TYPE_ATTACHMENT
+
 		if path == ':':
 			return Path(':'), type
 		else:
 			name = decode_filename(path)
 			Path.assertValidPageName(name)
 			return Path(name), type
+
+	def map_filepath(self, path):
+		'''Like L{map_file} but takes a string with relative path'''
+		return self.map_file(self.root.file(path))
 
 	def resolve_conflict(self, *filepaths):
 		'''Decide which is the real page file when multiple files
@@ -132,14 +155,14 @@ class FilesLayout(NotebookLayout):
 		@returns: L{FilePath} that should take precedent as te page
 		source
 		'''
-		filespaths.sort(key=lambda p: (p.ctime(), p.basename))
+		filepaths.sort(key=lambda p: (p.ctime(), p.basename))
 		return filepaths[0]
 
 	def get_format(self, file):
 		if file.path.endswith(self.default_extension):
 			return self.default_format
 		else:
-			raise AssertionError('Unknown file type for page: %s' % file)
+			raise AssertionError('Unknown file type for page: %s' % file.basename)
 
 	def index_list_children(self, pagename):
 		# Convenience method - remove if no longer used by the index
@@ -150,7 +173,7 @@ class FilesLayout(NotebookLayout):
 		names = set()
 		for object in folder:
 			if isinstance(object, File):
-				if object.path.endswith(self.default_extension):
+				if self.is_source_file(object):
 					name = object.basename[:-len(self.default_extension)]
 				else:
 					continue
@@ -166,9 +189,12 @@ class FilesLayout(NotebookLayout):
 
 class FilesAttachmentFolder(object):
 
-	def __init__(self, folder, default_extension):
+	def __init__(self, folder, is_source_file_func):
 		self._inner_fs_object = folder
-		self._default_extension = default_extension
+		self._is_source_file_func = is_source_file_func
+
+	def __str__(self):
+		return str(self._inner_fs_object)
 
 	def __getattr__(self, name):
 		return getattr(self._inner_fs_object, name)
@@ -176,7 +202,7 @@ class FilesAttachmentFolder(object):
 	def __iter__(self):
 		for obj in self._inner_fs_object:
 			if isinstance(obj, File) \
-			and not obj.basename.endswith(self._default_extension) \
+			and not self._is_source_file_func(obj) \
 			and not obj.basename.endswith('.zim'):
 				yield obj
 

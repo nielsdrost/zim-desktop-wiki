@@ -10,7 +10,7 @@ import re
 import string
 
 from zim.formats import *
-from zim.parsing import TextBuffer, link_type
+from zim.parse.links import link_type
 from zim.config.dicts import Choice
 
 
@@ -34,6 +34,21 @@ def html_encode(text):
 		return text
 	else:
 		return ''
+
+
+def html_decode(text):
+	if not text is None:
+		text = text.replace('&amp;', '&')
+		text = text.replace('&lt;',  '<')
+		text = text.replace('&gt;',  '>')
+		return text
+	else:
+		return ''
+
+
+def html_to_text(html):
+	text = re.sub('<.*?>', '', html) # remove html tags
+	return html_decode(text)
 
 
 class Dumper(DumperClass):
@@ -61,50 +76,53 @@ class Dumper(DumperClass):
 		return DumperClass.dump(self, tree)
 
 	def encode_text(self, tag, text):
-		# if _isrtl is already set the direction was already
-		# determined for this section
-		if self._isrtl is None and not text.isspace():
-			self._isrtl = self.isrtl(text)
-
-		text = html_encode(text)
-		if tag not in (VERBATIM_BLOCK, VERBATIM, OBJECT) \
-		and not self.template_options['line_breaks'] == 'remove':
-			text = text.replace('\n', '<br>\n')
-
-		return text
-
-	def text(self, text):
-		if self.context[-1].tag == FORMATTEDTEXT \
-		and text.isspace():
-			# Reduce top level empty lines
+		if tag == FORMATTEDTEXT and text.isspace():
 			if self.template_options['empty_lines'] == 'remove':
-				self.context[-1].text.append('\n')
+				return '\n'
 			else:
-				l = text.count('\n') - 1
-				if l > 0:
-					self.context[-1].text.append('\n' + ('<br>\n' * l) + '\n')
-				elif l == 0:
-					self.context[-1].text.append('\n')
+				return '<br>\n'
 		else:
-			DumperClass.text(self, text)
+			# if _isrtl is already set the direction was already
+			# determined for this section
+			if self._isrtl is None and not text.isspace():
+				self._isrtl = self.isrtl(text)
+
+			text = html_encode(text)
+			if tag not in (VERBATIM_BLOCK, VERBATIM, OBJECT) \
+			and not self.template_options['line_breaks'] == 'remove':
+				text = text.replace('\n', '<br>\n')
+
+			return text
+
+	def _strip_newline(self, strings):
+		if strings and strings[-1].endswith('<br>\n'):
+			strings[-1] = strings[-1][:-5]
+		elif strings and strings[-1].endswith('\n'):
+			strings[-1] = strings[-1][:-1]
+
+	def _start_list(self):
+		if self.context[-1].tag == LISTITEM:
+			# strip '\n' introduced by encode_text()
+			self._strip_newline(self.context[-1].text)
+			self.context[-1].text.append('\n')
 
 	def dump_h(self, tag, attrib, strings):
+		self._strip_newline(strings)
+
 		h = 'h' + str(attrib['level'])
+		id = heading_to_anchor(html_to_text(''.join(strings)))
 		if self._isrtl:
-			start = '<' + h + ' dir=\'rtl\'>'
+			start = '<%s dir=\'rtl\'>' % h
 		else:
-			start = '<' + h + '>'
+			start = '<%s>' % h
 		self._isrtl = None # reset
-		end = '</' + h + '>\n'
+		end = '<a id="%s" class="h_anchor"></a></%s>\n' % (id, h)
 		strings.insert(0, start)
 		strings.append(end)
 		return strings
 
 	def dump_block(self, tag, attrib, strings, _extra=None):
-		if strings and strings[-1].endswith('<br>\n'):
-			strings[-1] = strings[-1][:-5]
-		elif strings and strings[-1].endswith('\n'):
-			strings[-1] = strings[-1][:-1]
+		self._strip_newline(strings)
 
 		start = '<' + tag
 		if self._isrtl:
@@ -139,9 +157,14 @@ class Dumper(DumperClass):
 	dump_p = dump_block
 	dump_div = dump_block
 	dump_pre = dump_block
-	dump_ul = dump_block
+
+	def dump_ul(self, tag, attrib, strings):
+		self._start_list()
+		return self.dump_block(tag, attrib, strings)
 
 	def dump_ol(self, tag, attrib, strings):
+		self._start_list()
+
 		myattrib = ''
 		if 'start' in attrib:
 			start = attrib['start']
@@ -159,6 +182,8 @@ class Dumper(DumperClass):
 			return self.dump_block(tag, attrib, strings)
 
 	def dump_li(self, tag, attrib, strings):
+		self._strip_newline(strings)
+
 		bullet = attrib.get('bullet', BULLET)
 		if self.context[-1].tag == BULLETLIST and bullet != BULLET:
 			start = '<li class="%s"' % bullet
@@ -178,6 +203,10 @@ class Dumper(DumperClass):
 			strings.insert(0, '</li>\n')
 
 		return strings
+
+	def dump_anchor(self, tag, attrib, strings=None):
+		name = attrib['name']
+		return ['<a id="%s" class="anchor"></a>' % name]
 
 	def dump_link(self, tag, attrib, strings=None):
 		href = self.linker.link(attrib['href'])

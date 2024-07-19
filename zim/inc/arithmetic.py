@@ -139,14 +139,14 @@ getcontext().prec = 100
 
 
 def safe_eval(expression):
-	'''Safe evaluation of a python expression'''
-	GLOBALS = {'__builtins__': None} # Don't allow open() etc.
-	try:
-		re = eval(expression, GLOBALS, {'Decimal': Decimal})
-	except Exception as e:
-		raise
+    '''Safe evaluation of a python expression'''
+    GLOBALS = {'__builtins__': None} # Don't allow open() etc.
+    try:
+        re = eval(expression, GLOBALS, {'Decimal': Decimal})
+    except Exception as e:
+        raise
 
-	return re
+    return re
 
 
 def evaluate(expression_text, UseDigitGrouping = True, variables = {}, functions = {}):
@@ -295,8 +295,9 @@ def TypeAndValueOf(expression):
 class Parser:
     'Base class'
 
-    def __init__(self):
+    def __init__(self, output_decimals=6):
         # Written by parseLine(), read by evaluate():
+        self.output_decimals = output_decimals
         self.functions = {}
         self.variables = {}
 
@@ -386,7 +387,7 @@ class Parser:
                                         variables=variables, functions=functions))
                             self.writeResult(i, lines, mEqualSignAct.end(), RightActEnd, resultado)
                         except:
-                            logger.warn('eval error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
+                            logger.warning('eval error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
                     elif tipoLeft == 'n' and tipoRight in 'ifav':
                         if valorLeft not in functions:     # variable on the left
                             if tipoRight != 'v':    # assign to variable
@@ -395,7 +396,7 @@ class Parser:
                                                             variables=variables, functions=functions))
 
                                 except:
-                                    logger.warn('exec error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
+                                    logger.warning('exec error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
                                     raise
                             else:                   # evaluate a variable
                                 if valorLeft in variables:
@@ -410,7 +411,7 @@ class Parser:
                                                 variables=variables, functions=functions))
                                     self.writeResult(i, lines, mEqualSignAct.end(), RightActEnd, resultado)
                                 except:
-                                    logger.warn('eval error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
+                                    logger.warning('eval error: %s, %s, %s, %s', tipoLeft, valorLeft, tipoRight, valorRight)
                             else:                   # recurrence relation
                                 if valorLeft not in variables:            # initial value
                                   if valorRight != '':
@@ -487,6 +488,12 @@ class ParserGTK(Parser):
 
     def writeResult(self, i, textBuffer, start, end, text):
         'Write text in line i of lines from start to end offset.'
+        # Format decimals
+        formatted = f"{float(text):.{self.output_decimals}f}"
+        # Don't add unnecessary zeros
+        if len(formatted) < len(text):
+            text = formatted
+
         # Delete
         if end > start:
             # handle start at end of line or beyond

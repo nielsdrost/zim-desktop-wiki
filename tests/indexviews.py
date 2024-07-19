@@ -92,7 +92,7 @@ def _get_sql(files):
 	folder = MockFolder('/mock/notebook/')
 	indexer = buildUpdateIter(folder)
 	for path, text in files:
-		folder.file(path).write(text)
+		folder.file(path).write('Content-Type: text/x-zim-wiki\n\n' + text)
 	indexer.check_and_update()
 	lines = list(indexer.db.iterdump())
 	indexer.db.close()
@@ -111,6 +111,7 @@ from zim.notebook.index.pages import PagesIndexer, PagesView, \
 	IndexNotFoundError
 	#get_treepath_for_indexpath_factory, get_indexpath_for_treepath_factory, \
 	#get_treepaths_for_indexpath_flatlist_factory, get_indexpath_for_treepath_flatlist_factory, \
+
 
 class TestPagesView(tests.TestCase):
 
@@ -256,10 +257,10 @@ class TestPagesView(tests.TestCase):
 
 	def testTreePathMethods(self):
 		db = new_test_database()
-		mockindex = tests.MockObject()
+		mockindex = tests.MockObject(methods=('connect',))
 		mockindex._db = db
-		mockindex.update_iter = tests.MockObject()
-		mockindex.update_iter.pages = tests.MockObject()
+		mockindex.update_iter = tests.MockObject(methods=('connect',))
+		mockindex.update_iter.pages = tests.MockObject(methods=('connect',))
 
 		model = PagesTreeModelMixin(mockindex)
 
@@ -275,6 +276,32 @@ class TestPagesView(tests.TestCase):
 		p = model.get_mytreeiter((1, 2, 3, 4, 5))
 		self.assertIsNone(p)
 		self.assertRaises(IndexNotFoundError, model.find, Path('non-existing-page'))
+
+	def testMatchPages(self):
+		db = new_test_database()
+		pages = PagesView(db)
+		self.assertEqual([p.name for p in pages.match_pages(Path(':'), 'ild')], [])
+		self.assertEqual([p.name for p in pages.match_pages(Path('Foo'), 'ild')], ['Foo:Child1', 'Foo:Child2', 'Foo:Child3'])
+		self.assertEqual([p.name for p in pages.match_pages(Path('Foo:Child1'), 'ild')], ['Foo:Child1:GrandChild1', 'Foo:Child1:GrandChild2'])
+		self.assertEqual([p.name for p in pages.match_pages(Path('Foo'), 'xyz')], [])
+
+	def testMatchAllPages(self):
+		db = new_test_database()
+		pages = PagesView(db)
+		self.assertEqual([p.name for p in pages.match_all_pages('xyz')], [])
+		self.assertEqual([p.name for p in pages.match_all_pages('ild')],
+			['Foo:Child1', 'Foo:Child2', 'Foo:Child3', 'Foo:Child1:GrandChild1', 'Foo:Child1:GrandChild2'])
+
+	def testMatchAllPagesByWords(self):
+		db = new_test_database()
+		pages = PagesView(db)
+		self.assertEqual([p.name for p in pages.match_all_pages_by_words(['xyz'])], [])
+		self.assertEqual([p.name for p in pages.match_all_pages_by_words(['ild'])],
+			['Foo:Child1', 'Foo:Child2', 'Foo:Child3', 'Foo:Child1:GrandChild1', 'Foo:Child1:GrandChild2'])
+		self.assertEqual([p.name for p in pages.match_all_pages_by_words(['ild', 'and'])],
+			['Foo:Child1:GrandChild1', 'Foo:Child1:GrandChild2'])
+		self.assertEqual([p.name for p in pages.match_all_pages_by_words(['and', 'ild'])],
+			['Foo:Child1:GrandChild1', 'Foo:Child1:GrandChild2'])
 
 
 from zim.notebook.index.tags import TagsIndexer, TagsView, IndexTag, \
@@ -339,11 +366,11 @@ class TestTagsView(tests.TestCase):
 
 	def testTaggedPagesTreePathMethods(self):
 		db = new_test_database()
-		mockindex = tests.MockObject()
+		mockindex = tests.MockObject(methods=('connect',))
 		mockindex._db = db
 		mockindex.update_iter = tests.MockObject()
-		mockindex.update_iter.pages = tests.MockObject()
-		mockindex.update_iter.tags = tests.MockObject()
+		mockindex.update_iter.pages = tests.MockObject(methods=('connect',))
+		mockindex.update_iter.tags = tests.MockObject(methods=('connect',))
 		model = TaggedPagesTreeModelMixin(mockindex, tags=('tag1', 'tag2'))
 
 		# Test all pages
@@ -369,11 +396,11 @@ class TestTagsView(tests.TestCase):
 
 	def testTagsTreePathMethods(self):
 		db = new_test_database()
-		mockindex = tests.MockObject()
+		mockindex = tests.MockObject(methods=('connect',))
 		mockindex._db = db
 		mockindex.update_iter = tests.MockObject()
-		mockindex.update_iter.pages = tests.MockObject()
-		mockindex.update_iter.tags = tests.MockObject()
+		mockindex.update_iter.pages = tests.MockObject(methods=('connect',))
+		mockindex.update_iter.tags = tests.MockObject(methods=('connect',))
 
 		model = TagsTreeModelMixin(mockindex, tags=('tag1', 'tag2'))
 		tags = TagsView(db)

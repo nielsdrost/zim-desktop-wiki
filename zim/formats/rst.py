@@ -28,6 +28,7 @@ class Dumper(TextDumper):
 		XCHECKED_BOX: '- \u2612',
 		CHECKED_BOX: '- \u2611',
 		MIGRATED_BOX: '- \u25B7',
+		TRANSMIGRATED_BOX: '- \u25C1',
 		BULLET: '-',
 	}
 
@@ -59,8 +60,8 @@ class Dumper(TextDumper):
 			level = 4
 		char = self.HEADING_UNDERLINE[level - 1]
 		heading = ''.join(strings)
-		underline = char * len(heading)
-		return [heading + '\n', underline]
+		underline = char * len(heading.strip('\n'))
+		return [heading, underline + '\n']
 
 	def dump_pre(self, tag, attrib, strings):
 		# prefix last line with "::\n\n"
@@ -88,7 +89,7 @@ class Dumper(TextDumper):
 			elif v: # skip None, "" and 0
 				text += '   :%s: %s\n' % (k, v)
 
-		return text + '\n'
+		return [text + '\n']
 
 		# TODO use text for caption (with full recursion)
 		# can be done using "figure" directive

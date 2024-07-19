@@ -1,5 +1,5 @@
 
-# Copyright 2008-2013 Jaap Karssenberg <jaap.karssenberg@gmail.com>
+# Copyright 2008-2022 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 '''Package with source formats for pages.
 
@@ -54,6 +54,16 @@ Unlike html we respect line breaks and other whitespace as is.
 When rendering as html use the "white-space: pre" CSS definition to
 get the same effect.
 
+Text blocks (paragraphs, listitems, headings, vertabim blocks) must end with a
+newline. Only the last block of the sequence can omit the newline. This case
+will be interpreted as a text snippet and affect copy-paste behavior.
+
+Tables and other objects that are not inline are implicitly handled as ending in
+a newline.
+
+As a result the newlines outsides blocks represent the number of empty lines
+between the blocks and newline ending the block is contained in the block.
+
 If a page starts with a h1 this heading is considered the page title,
 else we can fall back to the page name as title.
 
@@ -64,24 +74,24 @@ to a title or subtitle in the document.
 '''
 
 import re
-import string
 import itertools
 import logging
+import collections
 
-import types
+from functools import reduce
 
-from zim.fs import Dir, File
-from zim.parsing import link_type, is_url_re, is_www_link_re, \
-	url_encode, url_decode, URL_ENCODE_READABLE, URL_ENCODE_DATA
-from zim.parser import Builder
-from zim.config import data_file, ConfigDict
+logger = logging.getLogger('zim.formats')
+
+
+from zim.parse.encode import url_decode, url_encode, URL_ENCODE_READABLE, URL_ENCODE_DATA
+from zim.parse.links import link_type, is_url_re, is_www_link_re
+from zim.parse.tokenlist import TokenParser, topLevelLists, collect_until_end_token
+from zim.parse.builder import Builder
+
+from zim.config import ConfigDict
 from zim.plugins import PluginManager
 
 import zim.plugins
-from functools import reduce
-
-
-logger = logging.getLogger('zim.formats')
 
 # Needed to determine RTL, but may not be available
 # if gtk bindings are not installed
@@ -89,7 +99,7 @@ try:
 	from gi.repository import Pango
 except:
 	Pango = None
-	logger.warn('Could not load pango - RTL scripts may look bad')
+	logger.warning('Could not load pango - RTL scripts may look bad')
 
 import xml.etree.ElementTree # needed to compile with cElementTree
 try:
@@ -107,6 +117,7 @@ UNCHECKED_BOX = 'unchecked-box'
 CHECKED_BOX = 'checked-box'
 XCHECKED_BOX = 'xchecked-box'
 MIGRATED_BOX = 'migrated-box'
+TRANSMIGRATED_BOX = "transmigrated-box"
 BULLET = '*' # FIXME make this 'bullet'
 
 FORMATTEDTEXT = 'zim-tree'
@@ -124,6 +135,8 @@ BULLETLIST = 'ul'
 NUMBEREDLIST = 'ol'
 LISTITEM = 'li'
 
+BLOCK_LEVEL = (PARAGRAPH, HEADING, VERBATIM_BLOCK, BLOCK, LISTITEM) # Top levels with nested text
+
 EMPHASIS = 'emphasis' # TODO change to "em" to be in line with html
 STRONG = 'strong'
 MARK = 'mark'
@@ -131,6 +144,9 @@ VERBATIM = 'code'
 STRIKE = 'strike'
 SUBSCRIPT = 'sub'
 SUPERSCRIPT = 'sup'
+
+INLINE_STYLE_TAGS = (EMPHASIS, STRONG, MARK, VERBATIM, STRIKE, SUBSCRIPT, SUPERSCRIPT) # Inline tags without additional semantics
+
 
 LINK = 'link'
 TAG = 'tag'
@@ -143,9 +159,12 @@ TABLEROW = 'trow'
 TABLEDATA = 'td'
 
 LINE = 'line'
+OBJECT_LIKE = (OBJECT, TABLE, LINE) # Do not include trailing newline
 
-BLOCK_LEVEL = (PARAGRAPH, HEADING, VERBATIM_BLOCK, BLOCK, OBJECT, IMAGE, LISTITEM, TABLE)
 
+# Tokens
+TEXT = 'T'
+END = '/'
 
 
 _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -169,6 +188,25 @@ def increase_list_iter(listiter):
 			return None
 		except IndexError: # wrap to start of list
 			return _letters[0]
+
+
+def convert_list_iter_letter_to_number(listiter):
+	'''Convert a "letter" numbered list to a digit numbered list
+	Usefull for export to formats that do not support letter lists.
+	Both "A." and "a." convert to "1." assumption is that this function
+	is used for start iter only, not whole list
+	'''
+	try:
+		i = int(listiter)
+		return listiter
+	except ValueError:
+		try:
+			i = _letters.index(listiter) + 1
+			i = i if i <= 26 else i % 26
+			return str(i)
+		except ValueError: # listiter is not a letter
+			return None
+
 
 def encode_xml(text):
 	'''Encode text such that it can be used in xml
@@ -200,6 +238,10 @@ def canonical_name(name):
 		return name
 
 
+_aliases = {
+	'zim-wiki': 'wiki',
+}
+
 def get_format(name):
 	'''Returns the module object for a specific format.'''
 	# If this method is removes, class names in formats/*.py can be made more explicit
@@ -213,6 +255,7 @@ def get_format_module(name):
 	@param name: the format name
 	@returns: a module object
 	'''
+	name = _aliases.get(name, name)
 	return zim.plugins.get_module('zim.formats.' + canonical_name(name))
 
 
@@ -244,6 +287,15 @@ def get_dumper(name, *arg, **kwarg):
 	return klass(*arg, **kwarg)
 
 
+def heading_to_anchor(name):
+	"""Derive an anchor name from a heading"""
+	name = re.sub(r'\s', '-', name.strip().lower())
+	return re.sub(r'[^\w\-_]', '', name)
+
+
+TokenListElement = collections.namedtuple('TokenListElement', ('tag', 'attrib', 'content'))
+
+
 class ParseTree(object):
 	'''Wrapper for zim parse trees.'''
 
@@ -255,7 +307,20 @@ class ParseTree(object):
 	def __init__(self, *arg, **kwarg):
 		self._etree = ElementTreeModule.ElementTree(*arg, **kwarg)
 		self._object_cache = {}
-		self.meta = OrderedDict()
+		self.meta = LastDefinedOrderedDict()
+
+	@classmethod
+	def new_from_tokens(klass, tokens):
+		tokens = list(tokens) # TODO: allow efficient use of generator here ?
+		assert tokens
+		if tokens[0][0] != FORMATTEDTEXT:
+			tokens.insert(0, (FORMATTEDTEXT, None))
+			tokens.append((END, FORMATTEDTEXT))
+
+		builder = ParseTreeBuilder()
+		parser = TokenParser(builder)
+		parser.parse(tokens)
+		return builder.get_parsetree()
 
 	@property
 	def hascontent(self):
@@ -266,18 +331,20 @@ class ParseTree(object):
 		)
 
 	@property
-	def ispartial(self):
-		'''Returns True when this tree is a segment of a page
-		(like a copy-paste buffer).
-		'''
-		return self._etree.getroot().attrib.get('partial', False)
-
-	@property
 	def israw(self):
 		'''Returns True when this is a raw tree (which is representation
 		of TextBuffer, but not really valid).
 		'''
 		return self._etree.getroot().attrib.get('raw', False)
+
+	def _set_root_attrib(self, key, value):
+		self._etree.getroot().attrib[key] = value
+
+	def _get_root_attrib(self, key, default=None):
+		return self._etree.getroot().attrib.get(key, default)
+
+	def _pop_root_attrib(self, key, default=None):
+		return self._etree.getroot().attrib.pop(key, default)
 
 	def extend(self, tree):
 		# Do we need a deepcopy here ?
@@ -324,35 +391,61 @@ class ParseTree(object):
 		return xml.getvalue()
 
 	def copy(self):
-		builder = ParseTreeBuilder(_parsetree_roundtrip=True)
-		self.visit(builder)
-		return builder.get_parsetree()
+		#return self.__class__.new_from_tokens(list(self.iter_tokens()))
+		return ParseTree().fromstring(self.tostring())
 
 	def iter_tokens(self):
-		from zim.tokenparser import TokenBuilder
+		return iter(topLevelLists(self._get_tokens(self._etree.getroot())))
 
-		tb = TokenBuilder()
-		self.visit(tb)
-		return iter(tb.tokens)
+	def _get_tokens(self, node):
+		tokens = [(node.tag, node.attrib.copy())]
 
-	def iter_href(self):
+		if node.text:
+			for t in node.text.splitlines(True):
+				tokens.append((TEXT, t))
+
+		for child in node:
+			tokens.extend(self._get_tokens(child)) # recurs
+			if child.tail:
+				for t in child.tail.splitlines(True):
+					tokens.append((TEXT, t))
+
+		tokens.append((END, node.tag))
+		return tokens
+
+	def iter_href(self, include_page_local_links=False, include_anchors=False):
 		'''Generator for links in the text
+		@param include_anchors: if C{False} remove the target location from the
+		link and only yield unique links to pages
 		@returns: yields a list of unique L{HRef} objects
 		'''
 		from zim.notebook.page import HRef # XXX
+
 		seen = set()
 		for elt in itertools.chain(
 			self._etree.iter(LINK),
 			self._etree.iter(IMAGE)
 		):
 			href = elt.attrib.get('href')
-			if href and href not in seen:
-				seen.add(href)
-				if link_type(href) == 'page':
-					try:
-						yield HRef.new_from_wiki_link(href)
-					except ValueError:
-						pass
+			if not href or link_type(href) != 'page':
+				continue
+
+			try:
+				href_obj = HRef.new_from_wiki_link(href)
+			except ValueError:
+				continue
+
+			if not include_anchors:
+				if not href_obj.names:
+					continue # internal link within same page
+				elif href_obj.anchor:
+					href_obj.anchor = None
+					href = href_obj.to_wiki_link()
+
+			if href in seen:
+				continue
+			seen.add(href)
+			yield href_obj
 
 	def iter_tag_names(self):
 		'''Generator for tags in the page content
@@ -394,7 +487,7 @@ class ParseTree(object):
 	def get_heading_text(self, level=1):
 		heading_elem = self._get_heading_element(level)
 		if heading_elem is not None:
-			return self._elt_to_text(heading_elem)
+			return self._elt_to_text(heading_elem).strip()
 		else:
 			return ""
 
@@ -403,6 +496,7 @@ class ParseTree(object):
 		already has a heading of the specified level or higher it will be
 		replaced. Otherwise the new heading will be prepended.
 		'''
+		text = text.rstrip() + '\n'
 		heading = self._get_heading_element(level)
 		if heading is not None:
 			heading.text = text
@@ -415,25 +509,6 @@ class ParseTree(object):
 			heading.tail = '\n' + (root.text or '')
 			root.text = None
 			root.insert(0, heading)
-
-	def remove_heading(self, level=-1):
-		'''If the tree starts with a heading, remove it and any trailing
-		whitespace.
-		Will modify the tree.
-		@returns: a 2-tuple of text and heading level or C{(None, None)}
-		'''
-		root = self._etree.getroot()
-		roottext = root.text and not root.text.isspace()
-		children = list(root)
-
-		if children and not roottext:
-			first = children[0]
-			if first.tag == 'h':
-				mylevel = int(first.attrib['level'])
-				if level == -1 or mylevel <= level:
-					root.remove(first)
-					if first.tail and not first.tail.isspace():
-						root.text = first.tail # Keep trailing text
 
 	def cleanup_headings(self, offset=0, max=6):
 		'''Change the heading levels throughout the tree. This makes sure that
@@ -456,30 +531,9 @@ class ParseTree(object):
 			heading.attrib['level'] = newlevel
 			path.append((level, newlevel))
 
-	def resolve_images(self, notebook=None, path=None):
-		'''Resolves the source files for all images relative to a page path	and
-		adds a '_src_file' attribute to the elements with the full file path.
-		'''
-		if notebook is None:
-			for element in self._etree.iter('img'):
-				filepath = element.attrib['src']
-				element.attrib['_src_file'] = File(filepath)
-		else:
-			for element in self._etree.iter('img'):
-				filepath = element.attrib['src']
-				element.attrib['_src_file'] = notebook.resolve_file(element.attrib['src'], path)
-
-	def unresolve_images(self):
-		'''Undo effect of L{resolve_images()}, mainly intended for
-		testing.
-		'''
-		for element in self._etree.iter('img'):
-			if '_src_file' in element.attrib:
-				element.attrib.pop('_src_file')
-
 	def encode_urls(self, mode=URL_ENCODE_READABLE):
 		'''Calls encode_url() on all links that contain urls.
-		See zim.parsing for details. Modifies the parse tree.
+		See zim.parse.links for details. Modifies the parse tree.
 		'''
 		for link in self._etree.iter('link'):
 			href = link.attrib['href']
@@ -490,7 +544,7 @@ class ParseTree(object):
 
 	def decode_urls(self, mode=URL_ENCODE_READABLE):
 		'''Calls decode_url() on all links that contain urls.
-		See zim.parsing for details. Modifies the parse tree.
+		See zim.parse.links for details. Modifies the parse tree.
 		'''
 		for link in self._etree.iter('link'):
 			href = link.attrib['href']
@@ -543,234 +597,106 @@ class ParseTree(object):
 				else:
 					return False # empty element like image
 
-	def visit(self, visitor):
-		'''Visit all nodes of this tree
-
-		@note: If the visitor modifies the attrib dict on nodes, this
-		will modify the tree.
-
-		@param visitor: a L{Visitor} or L{Builder} object
-		'''
-		try:
-			self._visit(visitor, self._etree.getroot())
-		except VisitorStop:
-			pass
-
-	def _visit(self, visitor, node):
-		try:
-			if len(node): # Has children
-				visitor.start(node.tag, node.attrib)
-				if node.text:
-					visitor.text(node.text)
-				for child in node:
-					self._visit(visitor, child) # recurs
-					if child.tail:
-						visitor.text(child.tail)
-				visitor.end(node.tag)
-			else:
-				visitor.append(node.tag, node.attrib, node.text)
-		except VisitorSkip:
-			pass
-
-	def find(self, tag):
-		'''Find first occurence of C{tag} in the tree
-		@returns: a L{Node} object or C{None}
-		'''
-		for elt in self.findall(tag):
-			return elt # return first
+	def find_element(self, tag):
+		'''Helper function to find the first occurence of C{tag}, returns a L{TokenListElement} or C{None}'''
+		for e in self.iter_elements(tag):
+			return e # return first
 		else:
 			return None
 
-	def findall(self, tag):
-		'''Find all occurences of C{tag} in the tree
-		@param tag: tag name
-		@returns: yields L{Node} objects
+	def iter_elements(self, tag):
+		'''Helper function to find all occurences of C{tag}, yields L{TokenListElement}s'''
+		token_iter = self.iter_tokens()
+		for t in token_iter:
+			if t[0] == tag:
+				content = collect_until_end_token(token_iter, tag)
+				yield TokenListElement(t[0], t[1], content)
+
+	def substitute_elements(self, tags, func):
+		'''Helper function to create a copy while substituting certain elements
+
+		@param tags: list of tags to match
+		@param func: function that determines the substitution
+
+		The C{func} will get a L{TokenListElement} for each token that matches
+		C{tags}. The return value of C{func} can be C{None} to remove the element,
+		the same or a modified L{TokenListElement} or a list of tokens.
 		'''
-		for elt in self._etree.iter(tag):
-			yield Element.new_from_etree(elt)
-
-	def replace(self, tag, func):
-		'''Modify the tree by replacing all occurences of C{tag}
-		by the return value of C{func}.
-
-		@param tag: tag name
-		@param func: function to generate replacement values.
-		Function will be called as::
-
-			func(node)
-
-		Where C{node} is a L{Node} object representing the subtree.
-		If the function returns another L{Node} object or modifies
-		C{node} and returns it, the subtree will be replaced by this
-		new node.
-		If the function raises L{VisitorSkip} the replace is skipped.
-		If the function raises L{VisitorStop} the replacement of all
-		nodes will stop.
-		'''
-		try:
-			self._replace(self._etree.getroot(), tag, func)
-		except VisitorStop:
-			pass
-
-	def _replace(self, elt, tag, func):
-		# Two-step replace in order to do items in order
-		# of appearance.
-		replacements = []
-		for i, child in enumerate(elt):
-			if child.tag == tag:
-				try:
-					replacement = func(Element.new_from_etree(child))
-				except VisitorSkip:
-					pass
+		tokens = []
+		token_iter = self.iter_tokens()
+		for t in token_iter:
+			if t[0] in tags:
+				content = collect_until_end_token(token_iter, t[0])
+				replacement = func(TokenListElement(t[0], t[1], content))
+				if replacement is None:
+					pass # remove these tokens
+				elif isinstance(replacement, TokenListElement):
+					tokens.append((replacement.tag, replacement.attrib))
+					tokens.extend(replacement.content)
+					tokens.append((END, replacement.tag))
 				else:
-					replacements.append((i, child, replacement))
-			elif len(child):
-				self._replace(child, tag, func) # recurs
+					tokens.extend(replacement)
 			else:
-				pass
+				tokens.append(t)
+
+		return ParseTree.new_from_tokens(tokens)
 
 
-		if replacements:
-			self._do_replace(elt, replacements)
-
-	def _do_replace(self, elt, replacements):
-		offset = 0 # offset due to replacements
-		for i, child, node in replacements:
-			i += offset
-			if node is None or len(node) == 0:
-				# Remove element
-				tail = child.tail
-				elt.remove(child)
-				if tail:
-					self._insert_text(elt, i, tail)
-				offset -= 1
-			elif isinstance(node, Element):
-				# Just replace elements
-				newchild = self._node_to_etree(node)
-				newchild.tail = child.tail
-				elt[i] = newchild
-			elif isinstance(node, DocumentFragment):
-				# Insert list of elements and text
-				tail = child.tail
-				elt.remove(child)
-				offset -= 1
-				for item in node:
-					if isinstance(item, str):
-						self._insert_text(elt, i, item)
-					else:
-						assert isinstance(item, Element)
-						elt.insert(i, self._node_to_etree(item))
-						i += 1
-						offset += 1
-				if tail:
-					self._insert_text(elt, i, tail)
-			else:
-				raise TypeError('BUG: invalid replacement result')
-
-	@staticmethod
-	def _node_to_etree(node):
-		builder = ParseTreeBuilder()
-		node.visit(builder)
-		return builder._b.close()
-
-	def _insert_text(self, elt, i, text):
-		if i == 0:
-			if elt.text:
-				elt.text += text
-			else:
-				elt.text = text
+def split_heading_from_parsetree(parsetree, keep_head_token=True):
+	'''Helper function to split the header from a L{ParseTree}
+	Looks for a header at the start of a page and strips empty lines after it.
+	Returns two L{ParseTree} objects: one for the header and one for the main
+	body of the content - both can be C{None} if they are empty.
+	'''
+	token_iter = parsetree.iter_tokens()
+	heading = []
+	body = []
+	for t in token_iter:
+		if t[0] == FORMATTEDTEXT:
+			pass
+		elif t[0] == HEADING:
+			heading.append(t)
+			heading.extend(collect_until_end_token(token_iter, HEADING))
+			heading.append((END, HEADING))
+			break
+		elif t[0] == TEXT and t[1].isspace():
+			pass
 		else:
-			prev = elt[i - 1]
-			if prev.tail:
-				prev.tail += text
+			body.append(t)
+			break
+
+	if not body:
+		for t in token_iter:
+			if t[0] == TEXT and t[1].isspace():
+				pass
 			else:
-				prev.tail = text
+				body.append(t)
+				break
 
+	body.extend(list(token_iter))
+	if body[-1] == (END, FORMATTEDTEXT):
+		body.pop()
 
-class VisitorStop(Exception):
-	'''Exception to be raised to cancel a visitor action'''
-	pass
+	if heading and not keep_head_token:
+		heading = heading[1:-1]
+		if heading[-1][0] == TEXT:
+			if heading[-1][1] == '\n':
+				heading.pop()
+			elif heading[-1][1].endswith('\n'):
+				heading[-1] = (TEXT, heading[-1][1][:-1])
 
-
-class VisitorSkip(Exception):
-	'''Exception to be raised when the visitor should skip a leaf node
-	and not decent into it.
-	'''
-	pass
-
-
-class Visitor(object):
-	'''Conceptual opposite of a builder, but with same API.
-	Used to walk nodes in a parsetree and call callbacks for each node.
-	See e.g. L{ParseTree.visit()}.
-	'''
-
-	def start(self, tag, attrib=None):
-		'''Start formatted region
-
-		Visitor objects can raise two exceptions in this method
-		to influence the tree traversal:
-
-		  1. L{VisitorStop} will cancel the current parsing, but without
-			 raising an error. So code implementing a visit method should
-			 catch this.
-		  2. L{VisitorSkip} can be raised when the visitor wants to skip
-			 a node, and should prevent the implementation from further
-			 decending into this node
-
-		@note: If the visitor modifies the attrib dict on nodes, this
-		will modify the tree. If this is not intended, the implementation
-		needs to take care to copy the attrib to break the reference.
-
-		@param tag: the tag name
-		@param attrib: optional dict with attributes
-		@implementation: optional for subclasses
-		'''
-		pass
-
-	def text(self, text):
-		'''Append text
-		@param text: text to be appended as string
-		@implementation: optional for subclasses
-		'''
-		pass
-
-	def end(self, tag):
-		'''End formatted region
-		@param tag: the tag name
-		@raises AssertionError: when tag does not match current state
-		@implementation: optional for subclasses
-		'''
-		pass
-
-	def append(self, tag, attrib=None, text=None):
-		'''Convenience function to open a tag, append text and close
-		it immediatly.
-
-		Can raise L{VisitorStop} or L{VisitorSkip}, see C{start()}
-		for the conditions.
-
-		@param tag: the tag name
-		@param attrib: optional dict with attributes
-		@param text: formatted text
-		@implementation: optional for subclasses, default implementation
-		calls L{start()}, L{text()}, and L{end()}
-		'''
-		self.start(tag, attrib)
-		if text is not None:
-			self.text(text)
-		self.end(tag)
+	heading_tree = ParseTree.new_from_tokens(heading) if heading else None
+	body_tree = ParseTree.new_from_tokens(body) if body else None
+	return heading_tree, body_tree
 
 
 class ParseTreeBuilder(Builder):
 	'''Builder object that builds a L{ParseTree}'''
 
-	def __init__(self, partial=False, _parsetree_roundtrip=False):
-		self.partial = partial
+	def __init__(self):
 		self._b = ElementTreeModule.TreeBuilder()
 		self.stack = [] #: keeps track of current open elements
 		self._last_char = None
-		self._parsetree_roundtrip = _parsetree_roundtrip
 
 	def get_parsetree(self):
 		'''Returns the constructed L{ParseTree} object.
@@ -778,8 +704,6 @@ class ParseTreeBuilder(Builder):
 		can not be re-used.
 		'''
 		root = self._b.close()
-		if self.partial:
-			root.attrib['partial'] = True
 		return zim.formats.ParseTree(root)
 
 	def start(self, tag, attrib=None):
@@ -787,252 +711,167 @@ class ParseTreeBuilder(Builder):
 		self._b.start(tag, attrib)
 		self.stack.append(tag)
 		if tag in BLOCK_LEVEL:
+			if self._last_char and self._last_char != '\n':
+				logger.warning('Missing "\\n" before new block (%s)' % tag)
 			self._last_char = None
 
 	def text(self, text):
 		self._last_char = text[-1]
-
-		# FIXME hack for backward compat
-		if self.stack and self.stack[-1] in (HEADING, LISTITEM):
-			text = text.strip('\n')
-
 		self._b.data(text)
 
 	def end(self, tag):
-		if tag != self.stack[-1]:
-			raise AssertionError('Unmatched tag closed: %s' % tag)
-
-		if tag in BLOCK_LEVEL and not self._parsetree_roundtrip:
-			if self._last_char is not None and not self.partial:
-				#~ assert self._last_char == '\n', 'Block level text needs to end with newline'
-				if self._last_char != '\n' and tag not in (HEADING, LISTITEM):
-					self._b.data('\n')
-					# FIXME check for HEADING LISTITME for backward compat
-
-			# TODO if partial only allow missing \n at end of tree,
-			# delay message and trigger if not followed by get_parsetree ?
-
+		assert tag == self.stack[-1], 'Unmatched tag closed: %s' % tag
 		self._b.end(tag)
 		self.stack.pop()
-
-		# FIXME hack for backward compat
-		if tag == HEADING and not self._parsetree_roundtrip:
-			self._b.data('\n')
-
-		self._last_char = None
+		if tag in OBJECT_LIKE:
+			self._last_char = '\n' # Special case - implicit newline in object
 
 	def append(self, tag, attrib=None, text=None):
 		attrib = attrib.copy() if attrib is not None else {}
-		if tag in BLOCK_LEVEL:
-			if text and not text.endswith('\n'):
-				text += '\n'
-
-		# FIXME hack for backward compat
-		if text and tag in (HEADING, LISTITEM):
-			text = text.strip('\n')
 
 		self._b.start(tag, attrib)
 		if text:
+			self._last_char = text[-1]
 			self._b.data(text)
+		if tag in OBJECT_LIKE:
+			self._last_char = '\n' # Special case - implicit newline in object
 		self._b.end(tag)
 
-		# FIXME hack for backward compat
-		if tag == HEADING and not self._parsetree_roundtrip:
-			self._b.data('\n')
-
-		self._last_char = None
-
-
-count_eol_re = re.compile(r'\n+\Z')
-split_para_re = re.compile(r'((?:^[ \t]*\n){2,})', re.M)
+		if tag in OBJECT_LIKE:
+			self._last_char = '\n' # Special case - implicit newline in object
+		else:
+			self._last_char = text[-1] if text else None
 
 
-class OldParseTreeBuilder(object):
-	'''This class supplies an alternative for xml.etree.ElementTree.TreeBuilder
-	which cleans up the tree on the fly while building it. The main use
-	is to normalize the tree that is produced by the editor widget, but it can
-	also be used on other "dirty" interfaces.
+class BackwardParseTreeBuilderWithCleanup(object):
+	'''Adaptor for the pageview compatible with the old builder interface'''
 
-	This builder takes care of the following issues:
-		- ~~Inline tags ('emphasis', 'strong', 'h', etc.) can not span multiple lines~~
-		  (refactored out to `TextBuffer.get_parsetree()`)
-		- Tags can not contain only whitespace
-		- Tags can not be empty (with the exception of the 'img' tag)
-		- There should be an empty line before each 'h', 'p' or 'pre'
-		  (with the exception of the first tag in the tree)
-		- The 'p' and 'pre' elements should always end with a newline ('\\n')
-		- Each 'p', 'pre' and 'h' should be postfixed with a newline ('\\n')
-		  (as a results 'p' and 'pre' are followed by an empty line, the
-		  'h' does not end in a newline itself, so it is different)
-		- Newlines ('\\n') after a <li> alement are removed (optional)
-		- The element '_ignore_' is silently ignored
-	'''
+	# NOTE: Processing tokens here without "topLevelLists()" logic
 
-	## TODO TODO this also needs to be based on Builder ##
+	# TODO: Adaptor breaks text at newline - move to real pageview tokenizer, combine
+	# with breaking inline tags at newline - or handle both in token filter function
 
-	def __init__(self, remove_newlines_after_li=True):
-		assert remove_newlines_after_li, 'TODO'
-		self._stack = [] # stack of elements for open tags
-		self._last = None # last element opened or closed
-		self._data = [] # buffer with data
-		self._tail = False # True if we are after an end tag
-		self._seen_eol = 2 # track line ends on flushed data
-			# starts with "2" so check is ok for first top level element
+	# TODO: clean up of empty link & heading tags is a bit of a cludge, might be
+	# better resolved directly in tokenizer
+
+	def __init__(self):
+		self._tokens = []
 
 	def start(self, tag, attrib=None):
-		if tag == '_ignore_':
-			return self._last
-		elif tag == 'h':
-			self._flush(need_eol=2)
-		elif tag in ('p', 'pre'):
-			self._flush(need_eol=1)
-		else:
-			self._flush()
-		#~ print('START', tag)
-
-		if tag == 'h':
-			if not (attrib and 'level' in attrib):
-				logger.warn('Missing "level" attribute for heading')
-				attrib = attrib or {}
-				attrib['level'] = 1
-		elif tag == 'link':
-			if not (attrib and 'href' in attrib):
-				logger.warn('Missing "href" attribute for link')
-				attrib = attrib or {}
-				attrib['href'] = "404"
-		# TODO check other mandatory properties !
-
-		if attrib:
-			self._last = ElementTreeModule.Element(tag, attrib)
-		else:
-			self._last = ElementTreeModule.Element(tag)
-
-		if self._stack:
-			self._stack[-1].append(self._last)
-		else:
-			assert tag == 'zim-tree', 'root element needs to be "zim-tree"'
-		self._stack.append(self._last)
-
-		self._tail = False
-		return self._last
-
-	def end(self, tag):
-		if tag == '_ignore_':
-			return None
-		elif tag in ('p', 'pre'):
-			self._flush(need_eol=1)
-		else:
-			self._flush()
-		#~ print('END', tag)
-
-		self._last = self._stack[-1]
-		assert self._last.tag == tag, \
-			"end tag mismatch (expected %s, got %s)" % (self._last.tag, tag)
-		self._tail = True
-
-		if len(self._stack) > 1 and not (
-			tag in (IMAGE, OBJECT, HEADDATA, TABLEDATA)
-			or (self._last.text and not self._last.text.isspace())
-			or bool(list(self._last))
-		):
-			# purge empty tags
-			if self._last.text and self._last.text.isspace():
-				self._append_to_previous(self._last.text)
-
-			empty = self._stack.pop()
-			self._stack[-1].remove(empty)
-			children = list(self._stack[-1])
-			if children:
-				self._last = children[-1]
-				if not self._last.tail is None:
-					self._data = [self._last.tail]
-					self._last.tail = None
-			else:
-				self._last = self._stack[-1]
-				self._tail = False
-				if not self._last.text is None:
-					self._data = [self._last.text]
-					self._last.text = None
-
-			return empty
-
-		else:
-			return self._stack.pop()
+		if tag != '_ignore_':
+			self._tokens.append((tag, attrib))
 
 	def data(self, text):
-		assert isinstance(text, str)
-		self._data.append(text)
+		for t in text.splitlines(True):
+			if t:
+				self._tokens.append((TEXT, t))
 
-	def append(self, tag, text):
-		self.start(tag)
-		self.data(text)
-		self.end(tag)
-
-	def _flush(self, need_eol=0):
-		# need_eol makes sure previous data ends with \n
-
-		#~ print('DATA:', self._data)
-		text = ''.join(self._data)
-		self._data = []
-
-		# Fix trailing newlines
-		if text:
-			m = count_eol_re.search(text)
-			if m:
-				seen = len(m.group(0))
-				if seen == len(text):
-					self._seen_eol += seen
-				else:
-					self._seen_eol = seen
-			else:
-				self._seen_eol = 0
-
-		if need_eol > self._seen_eol:
-			text += '\n' * (need_eol - self._seen_eol)
-			self._seen_eol = need_eol
-
-		# Fix prefix newlines
-		if self._tail and self._last.tag in ('h', 'p') \
-		and not text.startswith('\n'):
-			if text:
-				text = '\n' + text
-			else:
-				text = '\n'
-				self._seen_eol = 1
-		elif self._tail and self._last.tag == 'li' \
-		and text.startswith('\n'):
-			text = text[1:]
-			if not text.strip('\n'):
-				self._seen_eol -= 1
-
-		if text:
-			assert not self._last is None, 'data seen before root element'
-			if self._tail:
-				assert self._last.tail is None, "internal error (tail)"
-				self._last.tail = text
-			else:
-				assert self._last.text is None, "internal error (text)"
-				self._last.text = text
+	def end(self, tag):
+		if tag != '_ignore_':
+			self._tokens.append((END, tag))
 
 	def close(self):
-		assert len(self._stack) == 0, 'missing end tags'
-		assert not self._last is None and self._last.tag == 'zim-tree', 'missing root element'
-		return self._last
+		_pop_empty_head_and_linke(self._tokens)
+		tokens = list(strip_whitespace(iter(self._tokens)))
 
-	def _append_to_previous(self, text):
-		'''Add text before current element'''
-		parent = self._stack[-2]
-		children = list(parent)[:-1]
-		if children:
-			if children[-1].tail:
-				children[-1].tail = children[-1].tail + text
+		builder = ParseTreeBuilder()
+		for t in tokens:
+			if t[0] == END:
+				builder.end(t[1])
+			elif t[0] == TEXT:
+				builder.text(t[1])
 			else:
-				children[-1].tail = text
+				builder.start(*t)
+
+		return builder._b.close() # XXX
+
+
+def _pop_empty_head_and_linke(tokens):
+	# Filter needed to pass testIllegalHeadingWithListItem and testIllegalDoubleLink tests
+	i = len(tokens)-1
+	while i > 0:
+		if tokens[i][0] == END and tokens[i][1] in (HEADING, LINK) \
+			and tokens[i-1][0] == tokens[i][1]:
+				# Empty tag
+				tokens.pop(i)
+				tokens.pop(i-1)
+				i -= 2
 		else:
-			if parent.text:
-				parent.text = parent.text + text
-			else:
-				parent.text = text
+			i -= 1
+
+
+def strip_whitespace(token_iter):
+	'''Gererator that filters a token stream to sanitize whitespace around
+	inline formatting and remove empty tags
+	'''
+	# <b><i><space>foo</i></b> --> <space><b><i>foo</i></b>
+	# <b><space><i>foo</i></b> --> <space><b><i>foo</i></b>
+	# <b><i>foo<space></i></b> --> <b><i>foo</i></b><space>
+	# <b><i>foo</i><space></b> --> <b><i>foo</i></b><space>
+	# <b><i><space></i></b> --> <space>
+	# <b><i></i></b> -->  None
+	# <b><i><space><img /></i></b> --> <space><b><i><img /></i></b>
+	for t in token_iter:
+		if t[0] in INLINE_STYLE_TAGS:
+			for t in _strip_whitespace_inner(t, token_iter):
+				yield t
+		else:
+			yield t
+
+def _strip_whitespace_inner(start_tag, token_iter):
+	end_tag = (END, start_tag[0])
+	content = []
+	for t in token_iter:
+		if t == end_tag:
+			break
+		elif t[0] in INLINE_STYLE_TAGS:
+			content.extend(_strip_whitespace_inner(t, token_iter)) # recurs
+		else:
+			content.append(t)
+
+	# lstrip
+	prefix = None
+	if content and content[0][0] == TEXT:
+		text = content[0][1]
+		if text.isspace():
+			prefix = content.pop(0)
+		else:
+			stripped_text = text.lstrip()
+			i = len(text) - len(stripped_text)
+			if i > 0:
+				prefix = (TEXT, text[:i])
+				content[0] = (TEXT, text[i:])
+
+	# rstrip
+	postfix = None
+	if content and content[-1][0] == TEXT:
+		text = content[-1][1]
+		if text.isspace():
+			postfix = content.pop()
+		else:
+			stripped_text = text.rstrip()
+			i = len(text) - len(stripped_text)
+			if i > 0:
+				postfix = (TEXT, text[-i:])
+				content[-1] = (TEXT, text[:-i])
+
+	# put it together
+	if content:
+		content.insert(0, start_tag)
+		if prefix:
+			content.insert(0, prefix)
+
+		content.append(end_tag)
+		if postfix:
+			content.append(postfix)
+	elif prefix:
+		# ignore empty tag, just keep prefix if any
+		# cannot have postfix without content
+		content = [prefix]
+	else:
+		pass
+
+	return content
 
 
 class ParserClass(object):
@@ -1061,34 +900,27 @@ class ParserClass(object):
 			attrib = {'src': url[:i]}
 			for option in url[i + 1:].split('&'):
 				if option.find('=') == -1:
-					logger.warn('Mal-formed options in "%s"', url)
+					logger.warning('Mal-formed options in "%s"', url)
 					break
 
 				k, v = option.split('=', 1)
-				if k in ('width', 'height', 'type', 'href'):
+				if k in ('id', 'width', 'height', 'type', 'href'):
 					if len(v) > 0:
 						value = url_decode(v, mode=URL_ENCODE_DATA)
 						attrib[str(k)] = value # str to avoid unicode key
 				else:
-					logger.warn('Unknown attribute "%s" in "%s"', k, url)
+					logger.warning('Unknown attribute "%s" in "%s"', k, url)
 			return attrib
 		else:
 			return {'src': url}
 
 
-
-import collections
-
 DumperContextElement = collections.namedtuple('DumperContextElement', ('tag', 'attrib', 'text'))
-	# FIXME unify this class with a generic Element class (?)
 
 
-class DumperClass(Visitor):
+class DumperClass(object):
 	'''Base class for dumper classes. Dumper classes serialize the content
 	of a parse tree back to a text representation of the page content.
-	Therefore this class implements the visitor API, so it can be
-	used with any parse tree implementation or parser object that supports
-	this API.
 
 	To implement a dumper class, you need to define handlers for all
 	tags that can appear in a page. Tags that are represented by a simple
@@ -1109,6 +941,14 @@ class DumperClass(Visitor):
 	when a tag is closed either picks the appropriate prefix and postfix
 	from C{TAGS} or calls the corresponding C{dump_} method. As a result
 	tags are serialized depth-first.
+
+	NOTE: content that is serialized from a C{PageView} contains some
+	"illegal" shortcuts for which a Dumper of a native format (used to read/write
+	pages - not just export) should be robust:
+
+	  - paragraph tags are missing
+	  - list tags are missing, instead list items have an "indent" attribute
+
 
 	@ivar linker: the (optional) L{Linker} object, used to resolve links
 	@ivar template_options: a L{ConfigDict} with options that may be set
@@ -1135,13 +975,13 @@ class DumperClass(Visitor):
 
 	def dump(self, tree):
 		'''Format a parsetree to text
-		@param tree: a parse tree object that supports a C{visit()} method
+		@param tree: a C{ParseTree} object
 		@returns: a list of lines
 		'''
 		# FIXME - issue here is that we need to reset state - should be in __init__
 		self._text = []
 		self.context = [DumperContextElement(None, None, self._text)]
-		tree.visit(self)
+		self._dump(tree.iter_tokens())
 		if len(self.context) != 1:
 			raise AssertionError('Unclosed tags on tree: %s' % self.context[-1].tag)
 		#~ import pprint; pprint.pprint(self._text)
@@ -1153,72 +993,39 @@ class DumperClass(Visitor):
 		'''
 		return ''.join(self._text).splitlines(1)
 
-	def start(self, tag, attrib=None):
-		if attrib:
-			attrib = attrib.copy() # Ensure dumping does not change tree
-		self.context.append(DumperContextElement(tag, attrib, []))
+	def _dump(self, token_iter):
+		for t in token_iter:
+			if t[0] == TEXT:
+				text = t[1]
+				if self.context[-1].tag != OBJECT:
+					text = self.encode_text(self.context[-1].tag, text)
+				self.context[-1].text.append(text)
+			elif t[0] == END:
+				assert t[1] == self.context[-1].tag, 'Unexpected tag closed: %s - stack: %r' % (t[1], [c.tag for c in self.context])
+				tag, attrib, strings = self.context.pop()
 
-	def text(self, text):
-		assert not text is None
-		if self.context[-1].tag != OBJECT:
-			text = self.encode_text(self.context[-1].tag, text)
-		self.context[-1].text.append(text)
+				if tag in self.TAGS:
+					if strings:
+						start, end = self.TAGS[tag]
+						strings.insert(0, start)
+						strings.append(end)
+					else:
+						pass # Skip empty tags silently
+				elif tag == FORMATTEDTEXT:
+					pass
+				else:
+					try:
+						method = getattr(self, 'dump_' + tag)
+					except AttributeError:
+						raise AssertionError('BUG: Unknown tag: %s' % tag)
 
-	def end(self, tag):
-		if not tag or tag != self.context[-1].tag:
-			raise AssertionError('Unexpected tag closed: %s' % tag)
-		_, attrib, strings = self.context.pop()
+					strings = method(tag, attrib, strings)
 
-		if tag in self.TAGS:
-			assert strings, 'Can not append empty %s element' % tag
-			start, end = self.TAGS[tag]
-			strings.insert(0, start)
-			strings.append(end)
-		elif tag == FORMATTEDTEXT:
-			pass
-		else:
-			try:
-				method = getattr(self, 'dump_' + tag)
-			except AttributeError:
-				raise AssertionError('BUG: Unknown tag: %s' % tag)
-
-			strings = method(tag, attrib, strings)
-			#~ try:
-				#~ u''.join(strings)
-			#~ except:
-				#~ print("BUG: %s returned %s" % ('dump_'+tag, strings))
-
-		if strings is not None:
-			self.context[-1].text.extend(strings)
-
-	def append(self, tag, attrib=None, text=None):
-		strings = None
-		if tag in self.TAGS:
-			assert text is not None, 'Can not append empty %s element' % tag
-			start, end = self.TAGS[tag]
-			text = self.encode_text(tag, text)
-			strings = [start, text, end]
-		elif tag == FORMATTEDTEXT:
-			if text is not None:
-				strings = [self.encode_text(tag, text)]
-		else:
-			if attrib:
-				attrib = attrib.copy() # Ensure dumping does not change tree
-
-			try:
-				method = getattr(self, 'dump_' + tag)
-			except AttributeError:
-				raise AssertionError('BUG: Unknown tag: %s' % tag)
-
-			if text is None:
-				strings = method(tag, attrib, [])
-			elif tag == OBJECT:
-				strings = method(tag, attrib, [text])
-			else:
-				strings = method(tag, attrib, [self.encode_text(tag, text)])
-
-		if strings is not None:
-			self.context[-1].text.extend(strings)
+				if strings is not None:
+					self.context[-1].text.extend(strings)
+			else: # START
+				attrib = t[1].copy() if t[1] else {} # Ensure dumping does not change tree
+				self.context.append(DumperContextElement(t[0], attrib, []))
 
 	def encode_text(self, tag, text):
 		'''Optional method to encode text elements in the output
@@ -1398,125 +1205,6 @@ class StubLinker(BaseLinker):
 		return file.name
 
 
-
-class Node(list):
-	'''Base class for DOM-like access to the document structure.
-	@note: This class is not optimized for keeping large structures
-	in memory.
-
-	@ivar tag: tag name
-	@ivar attrib: dict with attributes
-	'''
-
-	__slots__ = ('tag', 'attrib')
-
-	def __init__(self, tag, attrib=None, *content):
-		self.tag = tag
-		self.attrib = attrib
-		if content:
-			self.extend(content)
-
-	@classmethod
-	def new_from_etree(klass, elt):
-		obj = klass(elt.tag, dict(elt.attrib))
-		if elt.text:
-			obj.append(elt.text)
-		for child in elt:
-			subnode = klass.new_from_etree(child) # recurs
-			obj.append(subnode)
-			if child.tail:
-				obj.append(child.tail)
-		return obj
-
-	def get(self, key, default=None):
-		if self.attrib:
-			return self.attrib.get(key, default)
-		else:
-			return default
-
-	def set(self, key, value):
-		if not self.attrib:
-			self.attrib = {}
-		self.attrib[key] = value
-
-	def append(self, item):
-		if isinstance(item, DocumentFragment):
-			list.extend(self, item)
-		else:
-			list.append(self, item)
-
-	def gettext(self):
-		'''Get text as string
-		Ignores any markup and attributes and simply returns textual
-		content.
-		@note: do _not_ use as replacement for exporting to plain text
-		@returns: string
-		'''
-		strings = self._gettext()
-		return ''.join(strings)
-
-	def _gettext(self):
-		strings = []
-		for item in self:
-			if isinstance(item, str):
-				strings.append(item)
-			else:
-				strings.extend(item._gettext())
-		return strings
-
-	def toxml(self):
-		strings = self._toxml()
-		return ''.join(strings)
-
-	def _toxml(self):
-		strings = []
-		if self.attrib:
-			strings.append('<%s' % self.tag)
-			for key in sorted(self.attrib):
-				strings.append(' %s="%s"' % (key, encode_xml(self.attrib[key])))
-			strings.append('>')
-		else:
-			strings.append("<%s>" % self.tag)
-
-		for item in self:
-			if isinstance(item, str):
-				strings.append(encode_xml(item))
-			else:
-				strings.extend(item._toxml())
-
-		strings.append("</%s>" % self.tag)
-		return strings
-
-	__repr__ = toxml
-
-	def visit(self, visitor):
-		if len(self) == 1 and isinstance(self[0], str):
-			visitor.append(self.tag, self.attrib, self[0])
-		else:
-			visitor.start(self.tag, self.attrib)
-			for item in self:
-				if isinstance(item, str):
-					visitor.text(item)
-				else:
-					item.visit(visitor)
-			visitor.end(self.tag)
-
-
-class Element(Node):
-	'''Element class for DOM-like access'''
-	pass
-
-
-class DocumentFragment(Node):
-	'''Document fragment class for DOM-like access'''
-
-	def __init__(self, *content):
-		self.tag = FRAGMENT
-		self.attrib = None
-		if content:
-			self.extend(content)
-
-
 class TableParser():
 	'''Common functions for converting a table from its' xml structure to another format'''
 
@@ -1664,10 +1352,10 @@ class TableParser():
 		return cells
 
 
-from zim.config.dicts import OrderedDict
+from zim.base import LastDefinedOrderedDict
 
-_is_header_re = re.compile('^([\w\-]+):\s+(.*?)\n', re.M)
-_is_continue_re = re.compile('^([^\S\n]+)(.+?)\n', re.M)
+_is_header_re = re.compile(r'^([\w\-]+):\s+(.*?)\n', re.M)
+_is_continue_re = re.compile(r'^([^\S\n]+)(.+?)\n', re.M)
 
 def parse_header_lines(text):
 	'''Read header lines in the rfc822 format.
@@ -1680,7 +1368,7 @@ def parse_header_lines(text):
 	@returns: the text minus the headers and a dict with the headers
 	'''
 	assert isinstance(text, str)
-	meta = OrderedDict()
+	meta = LastDefinedOrderedDict()
 	match = _is_header_re.match(text)
 	pos = 0
 	while match:

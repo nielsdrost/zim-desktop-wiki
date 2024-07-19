@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger('zim.export')
 
-from zim.utils import MovingWindowIter
+from zim.base import MovingWindowIter
 
 from zim.config import data_file
 from zim.notebook import Path
@@ -17,7 +17,7 @@ from zim.export.exporters import Exporter, createIndexPage
 from zim.export.linker import ExportLinker
 from zim.export.template import ExportTemplateContext
 
-from zim.fs import Dir
+from zim.fs import adapt_from_oldfs
 from zim.newfs import FileNotFoundError, LocalFolder
 
 
@@ -69,8 +69,7 @@ class FilesExporterBase(Exporter):
 				dir.remove()
 
 			resources = self.template.resources_dir
-			if isinstance(resources, Dir):
-				resources = LocalFolder(resources.path)
+			resources = adapt_from_oldfs(resources)
 			resources.copyto(dir)
 
 

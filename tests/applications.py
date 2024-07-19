@@ -6,33 +6,35 @@
 
 import tests
 
+from tests import os_native_path
+
 import os
 import sys
 import shutil
 
 from gi.repository import Gtk
 
+from zim.newfs import LocalFile, FilePath
 from zim.gui.applications import *
 from zim.gui.applications import _create_application
 from zim.notebook import Path
-from zim.fs import Dir, TmpFile
+from zim.newfs.base import xdgmime
 
 THUMB_SIZE_NORMAL = 128
 
 
-@tests.skipIf(os.name == 'nt', 'Skip for windows')
-@tests.slowTest
+@tests.skipIf(xdgmime is None, 'No XDG mime info found')
 class TestXDGMimeInfo(tests.TestCase):
 
-	def runTest(self):
-		os.makedirs('tests/tmp/data_dir/mime/image/')
-		shutil.copyfile('./tests/data/png.xml', 'tests/tmp/data_dir/mime/image/png.xml')
+	def setUp(self):
+		data_dir = XDG_DATA_DIRS[0]
+		tests.TEST_DATA_FOLDER.file('png.xml').copyto(data_dir.file('mime/image/png.xml'))
 
-		dir = Dir('./data')
-		file = dir.file('zim.png')
+	def runTest(self):
+		file = tests.ZIM_DATA_FOLDER.file('zim.png')
 		icon = get_mime_icon(file, 128)
 		self.assertIsInstance(icon, GdkPixbuf.Pixbuf)
-		desc = get_mime_description(file.get_mimetype())
+		desc = get_mime_description(file.mimetype())
 		self.assertIsInstance(desc, str)
 		self.assertTrue(len(desc) > 5)
 
@@ -46,6 +48,42 @@ def replace(l, old, new):
 
 
 class TestApplications(tests.TestCase):
+
+	def testParseQuotes(self):
+		# Test split quoting rules according to Destop spec
+		for string, list in (
+			('"foo bar" "\\"foooo bar\\"" dusss ja \'foo\'',
+				['foo bar', '"foooo bar"', 'dusss', 'ja', '\'foo\'']),
+			("If you don't mind me' asking", # don't use single quote escapes
+				["If", "you", "don't", "mind", "me'", "asking"]),
+			("C:\\some\\path here",
+				["C:\\some\\path", "here"]), # Don't touch \ in this path!
+			("Some stray quote \"here", # invalid, handle gracefully
+				["Some", "stray", "quote", "\"here"]),
+		):
+			result = split_quoted_strings(string)
+			self.assertEqual(result, list)
+
+	def testDesktopFileQuoting(self):
+		# From the spec:
+		#
+		#    Note that the general escape rule for values of type string states
+		#    that the backslash character can be escaped as ("\\") as well and
+		#    that this escape rule is applied before the quoting rule. As such,
+		#    to unambiguously represent a literal backslash character in a
+		#    quoted argument in a desktop entry file requires the use of four
+		#    successive backslash characters ("\\\\")
+		#
+		for exec, cmd in (
+			('foo bar', ['foo', 'bar']),
+			('foo "two words"', ['foo', 'two words']),
+			(r'foo "escapes \\\\ here \\$"', ['foo', r'escapes \ here $']),
+			(r'C:\some\path here', [r'C:\some\path', 'here']), # Don't touch \ in this path!
+		):
+			entry = DesktopEntryDict()
+			entry['Desktop Entry'].input(Exec=exec)
+			self.assertEqual(entry.cmd, cmd)
+
 
 	def testParseExec(self):
 		'''Test parsing of .desktop Exec strings'''
@@ -69,15 +107,20 @@ class TestApplications(tests.TestCase):
 			('foo %F hmm', ('bar', 'baz'), ('foo', 'bar', 'baz', 'hmm')),
 			('foo %U', ('bar', 'baz'), ('foo', 'bar', 'baz')),
 			('foo %U hmm', ('bar', 'baz'), ('foo', 'bar', 'baz', 'hmm')),
-			('foo %f', (File('/foo/bar'),), ('foo', '/foo/bar')),
-			('foo %u', (File('/foo/bar'),), ('foo', 'file:///foo/bar')),
-			('foo %F', (File('/foo/bar'),), ('foo', '/foo/bar')),
-			('foo %U', (File('/foo/bar'),), ('foo', 'file:///foo/bar')),
+			('foo %f', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('/foo/bar'))),
+			('foo %f', (FilePath(os_native_path('/foo/bar')),), ('foo', os_native_path('/foo/bar'))),
+			('foo %u', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('file:///foo/bar'))),
+			('foo %F', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('/foo/bar'))),
+			('foo %U', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('file:///foo/bar'))),
+			('foo "%f"', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('/foo/bar'))),
+			('foo "file:%f"', (LocalFile(os_native_path('/foo/bar')),), ('foo', 'file:'+os_native_path('/foo/bar'))),
+			('foo "file:%F"', (LocalFile(os_native_path('/foo/bar')),), ('foo', 'file:%F', os_native_path('/foo/bar'))),
+			('foo "%u"', (LocalFile(os_native_path('/foo/bar')),), ('foo', os_native_path('file:///foo/bar'))),
+			('foo "url:%u"', (LocalFile(os_native_path('/foo/bar')),), ('foo', 'url:'+os_native_path('file:///foo/bar'))),
+			('foo "file:%U"', (LocalFile(os_native_path('/foo/bar')),), ('foo', 'file:%U', os_native_path('/foo/bar'))),
+			('foo %%f', ('file',), ('foo', '%f', 'file')),
+			('foo %%u', ('uri',), ('foo', '%u', 'uri')),
 		):
-			if os.name == 'nt':
-				wanted = replace(wanted, '/foo/bar', 'C:\\foo\\bar')
-				wanted = replace(wanted, 'file:///foo/bar', r'file:///C:/foo/bar')
-
 			#print app, args
 			entry['Desktop Entry']['Exec'] = app
 			result = entry.parse_exec(args)
@@ -87,11 +130,11 @@ class TestApplications(tests.TestCase):
 			self.assertEqual(argv, wanted)
 
 		entry['Desktop Entry']['Icon'] = 'xxx'
-		entry.file = File('/foo.desktop')
+		entry.file = LocalFile(os_native_path('/foo.desktop'))
 		for app, args, wanted in (
 			# Test cases should be compliant with spec
 			('foo %f %i', (), ('foo', '--icon', 'xxx')),
-			('foo %f %k', (), ('foo', '/foo.desktop')),
+			('foo %f %k', (), ('foo', os_native_path('/foo.desktop'))),
 			('foo %f %c', (), ('foo', 'Foo')),
 		):
 			if os.name == 'nt':
@@ -122,6 +165,33 @@ class TestApplications(tests.TestCase):
 	# see that json.loads does what it is supposed to do
 
 
+class TestTerminalCommand(tests.TestCase):
+
+	@tests.skipUnless(Application(('ls',)).tryexec(), 'Missing dependency')
+	def testLookUpTerminalOK(self):
+		# Using 'ls' as arbitrairy command we always expect to succeed
+		import zim.gui.applications
+		zim.gui.applications._terminal_commands = [('ls', '-la')]
+		cmd = zim.gui.applications._get_terminal_command(['foo', '-x'])
+		self.assertEqual(cmd, ('ls', '-la', 'foo', '-x'))
+
+		app = DesktopEntryDict()
+		app.update(Exec='foo -x', Terminal='true')
+		cmd = app._cmd([])
+		self.assertEqual(cmd, ('ls', '-la', 'foo', '-x'))
+
+	def testLookUpTerminalNOK(self):
+		import zim.gui.applications
+		zim.gui.applications._terminal_commands = [('non_existing_application', '-x')]
+		with self.assertRaises(TerminalLookUpError):
+			cmd = zim.gui.applications._get_terminal_command(['foo', '-x'])
+
+		app = DesktopEntryDict()
+		app.update(Exec='foo -x', Terminal='true')
+		with self.assertRaises(TerminalLookUpError):
+			cmd = app._cmd([])
+
+
 @tests.slowTest
 class TestApplicationManager(tests.TestCase):
 
@@ -130,18 +200,19 @@ class TestApplicationManager(tests.TestCase):
 
 		def remove_file(path):
 			#print("REMOVE", path)
-			assert path.startswith(tests.TMPDIR)
+			assert path.replace('\\', '/').startswith(tests.TMPDIR.replace('\\', '/'))
 			if os.path.exists(path):
 				os.unlink(path)
 
 		remove_file(XDG_CONFIG_HOME.file('mimeapps.list').path)
-		dir = XDG_DATA_HOME.subdir('applications')
-		for basename in dir.list():
-			remove_file(dir.file(basename).path)
+		dir = XDG_DATA_HOME.folder('applications')
+		if dir.exists():
+			for file in dir.list_files():
+				remove_file(file.path)
 
 	def testGetMimeType(self):
 		for obj, mimetype in (
-			(File('file.txt'), 'text/plain'),
+			(LocalFile(os_native_path('/non-existent/file.txt')), 'text/plain'),
 			('file.txt', 'text/plain'),
 			('ssh://host', 'x-scheme-handler/ssh'),
 			('http://host', 'x-scheme-handler/http'),
@@ -279,10 +350,10 @@ class TestApplicationManager(tests.TestCase):
 		self.addCleanup(restore_desktop)
 
 		os.environ['XDG_CURRENT_DESKTOP'] = 'Test'
-		desktopfile = XDG_CONFIG_HOME.file('Test-mimeapps.list')
+		desktopfile = XDG_CONFIG_HOME.file('test-mimeapps.list')
 		defaultfile = XDG_CONFIG_HOME.file('mimeapps.list')
 
-		dir = XDG_DATA_HOME.subdir('applications')
+		dir = XDG_DATA_HOME.folder('applications')
 		for basename in ('desktop-foo.desktop', 'normal-foo.desktop', 'ignore_this.desktop'):
 			_create_application(dir, basename, 'test', 'test')
 
@@ -311,7 +382,7 @@ class TestApplicationManager(tests.TestCase):
 		defaultfile = XDG_CONFIG_HOME.file('mimeapps.list')
 		backwardfile = XDG_DATA_HOME.file('applications/defaults.list')
 
-		dir = XDG_DATA_HOME.subdir('applications')
+		dir = XDG_DATA_HOME.folder('applications')
 		for basename in ('foo.desktop', 'bar.desktop', 'ignore_this.desktop'):
 			_create_application(dir, basename, 'test', 'test')
 
@@ -335,7 +406,7 @@ class TestApplicationManager(tests.TestCase):
 		defaultfile = XDG_CONFIG_HOME.file('mimeapps.list')
 		cachefile = XDG_DATA_HOME.file('applications/mimeinfo.cache')
 
-		dir = XDG_DATA_HOME.subdir('applications')
+		dir = XDG_DATA_HOME.folder('applications')
 		for basename in ('aaa.desktop', 'bbb.desktop', 'ccc.desktop', 'ddd.desktop', 'ignore_this.desktop', 'browser.desktop'):
 			_create_application(dir, basename, 'test', 'test', NoDisplay=False)
 		_create_application(dir, 'do_not_list.desktop', 'test', 'test', NoDisplay=True)
@@ -390,7 +461,7 @@ class Foo(object): # FIXME - this test blocks on full test runs ??
 
 		# Check menu
 		for obj, mimetype, test_entry in (
-			(File('file.txt'), 'text/plain', entry_text),
+			(LocalFile(os_native_path('/non-existent/file.txt')), 'text/plain', entry_text),
 			('ssh://host', 'x-scheme-handler/ssh', entry_url),
 		):
 			manager.set_default_application(mimetype, test_entry)
@@ -475,12 +546,11 @@ class TestOpenFunctions(tests.TestCase):
 
 	def testOpenFile(self):
 		from zim.gui.applications import open_file, NoApplicationFoundError
-		from zim.fs import adapt_from_newfs
 
 		widget = tests.MockObject()
 
 		with self.assertRaises(FileNotFoundError):
-			open_file(widget, File('/non-existing'))
+			open_file(widget, LocalFile(os_native_path('/non-existing')))
 
 		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
 		myfile = folder.file('test.txt')
@@ -491,10 +561,10 @@ class TestOpenFunctions(tests.TestCase):
 		manager.set_default_application('text/plain', entry)
 
 		open_file(widget, myfile)
-		self.assertEqual(self.calls[-1], (widget, entry, adapt_from_newfs(myfile), None))
+		self.assertEqual(self.calls[-1], (widget, entry, myfile, None))
 
 		open_file(widget, myfile, mimetype='text/plain')
-		self.assertEqual(self.calls[-1], (widget, entry, adapt_from_newfs(myfile), None))
+		self.assertEqual(self.calls[-1], (widget, entry, myfile, None))
 
 		with self.assertRaises(NoApplicationFoundError):
 			open_file(widget, myfile, mimetype='x-mimetype/x-with-no-application')
@@ -504,12 +574,11 @@ class TestOpenFunctions(tests.TestCase):
 
 	def testOpenFolder(self):
 		from zim.gui.applications import open_folder
-		from zim.fs import adapt_from_newfs
 
 		widget = tests.MockObject()
 
 		with self.assertRaises(FileNotFoundError):
-			open_folder(widget, File('/non-existing'))
+			open_folder(widget, LocalFile(os_native_path('/non-existing')))
 
 		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
 		myfolder = folder.folder('test')
@@ -517,11 +586,10 @@ class TestOpenFunctions(tests.TestCase):
 
 		entry = ApplicationManager().get_fallback_filebrowser()
 		open_folder(widget, myfolder)
-		self.assertEqual(self.calls[-1], (widget, entry, adapt_from_newfs(myfolder), None))
+		self.assertEqual(self.calls[-1], (widget, entry, myfolder, None))
 
 	def testOpenFolderCreate(self):
 		from zim.gui.applications import open_folder_prompt_create
-		from zim.fs import adapt_from_newfs
 
 		widget = tests.MockObject()
 		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
@@ -544,7 +612,7 @@ class TestOpenFunctions(tests.TestCase):
 			open_folder_prompt_create(widget, myfolder)
 
 		self.assertTrue(myfolder.exists())
-		self.assertEqual(self.calls[-1], (widget, entry, adapt_from_newfs(myfolder), None))
+		self.assertEqual(self.calls, [(widget, entry, myfolder, None)])
 
 	def testOpenUrl(self):
 		from zim.gui.applications import open_url

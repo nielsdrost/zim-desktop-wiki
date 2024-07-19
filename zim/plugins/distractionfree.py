@@ -34,8 +34,6 @@ class DistractionFreePlugin(PluginClass):
 	plugin_preferences = (
 		# key, type, label, default
 		('hide_menubar', 'bool', _('Hide menubar in fullscreen mode'), True), # T: plugin preference
-		('hide_toolbar', 'bool', _('Hide toolbar in fullscreen mode'), True), # T: plugin preference
-		('hide_statusbar', 'bool', _('Hide statusbar in fullscreen mode'), True), # T: plugin preference
 		('max_page_width', 'int', _('Maximum page width'), 850, (_minsize, 10000)), # T: plugin preference
 		('vmargin', 'int', _('Border width'), 50, (0, 10000)), # T: plugin preference
 		('basecolor', 'color', _('Text background color'), '#babdb6'), # T: plugin preference
@@ -51,7 +49,6 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 		MainWindowExtension.__init__(self, plugin, window)
 		self.preferences = plugin.preferences
 		self._show_panes = True
-		self._bar_state = None
 		self._maxwidth = None
 		self._css_provider = None
 
@@ -64,16 +61,23 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 	def _new_css_provider(self):
 		css = '''
 		#zim-pageview text {
-			color: %s;
-			background-color: %s;
+			color: %(textcolor)s;
+			caret-color : %(textcolor)s;
+			background-color: %(basecolor)s;
 		}
-		widget box box scrolledwindow{
+		#zim-window-main-box scrolledwindow{
 			border-style: none;
 			}
-		box {
-			background-color: %s;
+		#zim-window-main-box box {
+			background-color: %(basecolor)s;
 		}
-		''' % (self.preferences['textcolor'], self.preferences['basecolor'],self.preferences['basecolor'])
+		#zim-window-main-box button box {
+			background-color: @bg_color;
+		}
+		toolbar {
+			background-color: %(basecolor)s;
+		}
+		''' % self.preferences
 		provider = Gtk.CssProvider()
 		provider.load_from_data(css.encode('UTF-8'))
 		return provider
@@ -82,8 +86,6 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 	def on_preferences_changed(self, preferences):
 		if self.window.isfullscreen:
 			self.window.toggle_menubar(not preferences['hide_menubar'])
-			self.window.toggle_toolbar(not preferences['hide_toolbar'])
-			self.window.toggle_statusbar(not preferences['hide_statusbar'])
 
 	def on_window_state_event(self, window, event):
 		if bool(event.changed_mask & Gdk.WindowState.FULLSCREEN):
@@ -96,7 +98,6 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 		if window.isfullscreen:
 			self._show_panes = bool(window.get_visible_panes())
 			window.toggle_panes(False)
-			self.save_bar_state()
 			self.set_bar_state_fullscreen()
 			self.insert_maxwidth()
 			for widget in self._pathbar_widgets():
@@ -107,28 +108,12 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 			Gtk.StyleContext.remove_provider_for_screen(screen, self._css_provider)
 			self.remove_maxwidth()
 			window.toggle_panes(self._show_panes)
-			self.restore_bar_state()
 			for widget in self._pathbar_widgets():
 				widget.show()
 			window.pageview.grab_focus()
 
-	def save_bar_state(self):
-		self._bar_state = (
-			self.window.uistate['show_toolbar'],
-			self.window.uistate['show_statusbar'],
-		)
-
-	def restore_bar_state(self):
-		if self._bar_state is None:
-			return
-		show_toolbar, show_statusbar = self._bar_state
-		self.window.toggle_toolbar(show_toolbar)
-		self.window.toggle_statusbar(show_statusbar)
-
 	def set_bar_state_fullscreen(self):
 		self.window.toggle_menubar(not self.preferences['hide_menubar'])
-		self.window.toggle_toolbar(not self.preferences['hide_toolbar'])
-		self.window.toggle_statusbar(not self.preferences['hide_statusbar'])
 
 	def insert_maxwidth(self):
 		self._maxwidth = MaxWidth(self.preferences['max_page_width'])
@@ -155,9 +140,6 @@ class DistractionFreeMainWindowExtension(MainWindowExtension):
 			if widget == self.window._zim_window_top_minimized:
 				break
 			yield widget
-
-	def teardown(self):
-		self.restore_bar_state()
 
 
 class MaxWidth(Gtk.Bin):

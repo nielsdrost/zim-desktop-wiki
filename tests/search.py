@@ -5,6 +5,7 @@ import tests
 
 from zim.search import *
 from zim.notebook import Path
+from zim.plugins import indexed_fts
 
 class TestSearchRegex(tests.TestCase):
 
@@ -23,7 +24,7 @@ class TestSearchRegex(tests.TestCase):
 			#print '>>', word, regex
 			self.assertEqual(regex_func(word).pattern, re.compile(regex, re.I | re.U).pattern)
 
-		self.assertIn(regex_func('汉字').pattern, ('汉字', '\汉\字'))
+		self.assertIn(regex_func('汉字').pattern, ('汉字', r'\汉\字'))
 			# re.escape add extra "\" prior to python3.7, but not later
 			# goal of this check is to see no "\b" surrounding chines characters
 
@@ -42,7 +43,7 @@ class TestSearchRegex(tests.TestCase):
 
 class TestQuery(tests.TestCase):
 
-	def runTest(self):
+	def testKeywordParsingLinks(self):
 		query = Query('Links:Foo')
 		self.assertEqual(query.root, [QueryTerm('linksfrom', 'Foo')])
 
@@ -51,6 +52,27 @@ class TestQuery(tests.TestCase):
 
 		query = Query('Links:') # edge case, looking for literal occurrence
 		self.assertEqual(query.root, [QueryTerm('contentorname', 'Links:')])
+
+		query = Query('"Links:Foo"')
+		self.assertEqual(query.root, [QueryTerm('contentorname', 'Links:Foo')])
+
+	def testFindInput(self):
+		for query_input, wanted_find_input in (
+			('Foo', ('Foo', False)),
+			('*Foo*', ('Foo', False)),
+			('Foo Bar', ('Foo|Bar', True)),
+			('Foo && Bar', ('Foo|Bar', True)),
+			('Foo || Bar', ('Foo|Bar', True)),
+			('Foo -Bar', ('Foo', False)),
+			('Links: Foo', (None, None)),
+			('Tag: Foo', ('@Foo', False)),
+			('@Foo', ('@Foo', False)),
+			('@Foo Bar', (re.escape('@Foo') + '|Bar', True)),
+				# re.escape() behavior changed in 3.7 older versions also escape the "@"
+			('Foo... Bar', ('Foo\\.\\.\\.|Bar', True)),
+		):
+			query = Query(query_input)
+			self.assertEqual(query.find_input, wanted_find_input)
 
 
 class TestSearch(tests.TestCase):
@@ -222,6 +244,20 @@ class TestSearchFiles(TestSearch):
 
 	def runTest(self):
 		'''Test search API with file based notebook'''
+		TestSearch.runTest(self)
+
+@tests.skipIf(
+	indexed_fts.IndexedFTSPlugin.check_dependencies()[0] == False,
+	"Indexed FTS plugin not available"
+)
+class TestSearchIndexed(TestSearch):
+	'''Test case for integration with the indexed_fts plugin'''
+
+	def setUp(self):
+		plugin = PluginManager.load_plugin('indexed_fts')
+		TestSearch.setUp(self)
+
+	def runTest(self):
 		TestSearch.runTest(self)
 
 

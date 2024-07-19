@@ -78,6 +78,7 @@
 
 # Additional ISO-8859/1 entities listed in rfc1866 (section 14)
 \iexcl	161
+\iquest	191
 \cent	162
 \pound	163
 \curren	164
@@ -87,6 +88,7 @@
 \uml	168
 \ordf	170
 \laquo	171
+\raquo	187
 \not	172
 \shy	173
 \macr	175
@@ -101,11 +103,21 @@
 \middot	183
 \cedil	184
 \ordm	186
-\raquo	187
-\frac14	188
 \frac12	189
+\frac13	8531
+\frac14	188
+\frac15	8533
+\frac16	8537
+\frac18	8539
+\frac23	8532
+\frac25	8534
 \frac34	190
-\iquest	191
+\frac35	8535
+\frac38	8540
+\frac45	8536
+\frac56	8538
+\frac58	8541
+\frac78	8542
 \times	215
 \divide	247
 
@@ -178,6 +190,7 @@
 \rlm	8207
 \ndash	8211
 \mdash	8212
+\horbar 8213
 \lsquo	8216
 \rsquo	8217
 \sbquo	8218
@@ -205,6 +218,12 @@
 \uarr	8593
 \rarr	8594
 \darr	8595
+\nearr	8599
+\searr	8600
+\nwarr	8598
+\swarr	8601
+\curarr	8631
+\cularr	8630
 \harr	8596
 \crarr	8629
 \lArr	8656
@@ -228,19 +247,24 @@
 \prop	8733
 \infin	8734
 \ang	8736
+\angsph	8738
 \and	8743
 \or	8744
 \cap	8745
 \cup	8746
 \int	8747
 \there4	8756
+\bec	8757
 \sim	8764
 \cong	8773
 \asymp	8776
 \ne	8800
 \equiv	8801
+\wedgeq	8793
 \le	8804
+\les	10877
 \ge	8805
+\ges	10878
 \sub	8834
 \sup	8835
 \nsub	8836
@@ -268,26 +292,26 @@
 !=	8800  # not equal to sign (may also use =/= )
 
 # Numbers inside circles
-(1)     9312
-(2)     9313
-(3)     9314
-(4)     9315
-(5)     9316
-(6)     9317
-(7)     9318
-(8)     9319
-(9)     9320
-(10)    9321
-(11)    9322
-(12)    9323
-(13)    9324
-(14)    9325
-(15)    9326
-(16)    9327
-(17)    9328
-(18)    9329
-(19)    9330
-(20)    9331
+(1)	9312
+(2)	9313
+(3)	9314
+(4)	9315
+(5)	9316
+(6)	9317
+(7)	9318
+(8)	9319
+(9)	9320
+(10)	9321
+(11)	9322
+(12)	9323
+(13)	9324
+(14)	9325
+(15)	9326
+(16)	9327
+(17)	9328
+(18)	9329
+(19)	9330
+(20)	9331
 
 # Quotes
 <<	171   # left quotes
@@ -300,33 +324,50 @@
 \down	8595
 
 ## units ##
-\ohm	937	 # same as \omega
+\ohm	937   # same as \omega
 
 ## Additional typography ##
 # See https://en.wikipedia.org/wiki/Arrow_%28symbol%29 for more codes
 # convert hex -> decimal before using here
 -->	8594  # same as \right
-<-- 8592  # same as \left
-<-> 8596
-<--> 8596
+<--	8592  # same as \left
+<->	8596
+<-->	8596
 ==>	8658
-<=> 8660
-<==> 8660
-<== 8656
---	8212  # em dash aka &mdash; in HTML
+<=>	8660
+<==>	8660
+<==	8656
+--	8211  # en dash aka &ndash; in HTML
+---	8212  # em dash aka &mdash; in HTML
 =/=	8800  # not equal to sign (may also use \neq)
 +-	177   # +- sign
 +_	177   # +- sign
 
-<3		9825 # Heart empty
+<3	9825 # Heart empty
 \music	9835 # Beamed Eighth Notes
 \warn	9888 # Warning
-:)		9786 # Smiley  - have a nice day!
+:)	9786 # Smiley  - have a nice day!
 \smile	9786 # Smiley  - have a nice day!
 \mail	9993 # Envelope - Mail
 \tel	9990 # Telephone Sign
 \phone	9990 # Telephone Sign
 \flag	9873 # Black Flag
 
-## Suggestions for more shortcuts are welcome - please file in bug tracker ##
+\numero	8470 # numero sign
+\female	9792
+\male	9794
 
+# Box drawing characters
+\bddl	9488	# ┐ (box-drawing down and left)
+\bdul	9496	# ┘ (box-drawing up and left)
+\bddr	9484	# ┌ (box-drawing down and right)
+\bdur	9492	# └ (box-drawing up and right)
+\bdv	9474	# │ (box-drawing vertical)
+\bdh	9472	# ─ (box-drawing horizontal)
+\bdvh	9532	# ┼ (box-drawing vertical and horizontal)
+\bdvr	9500	# ├ (box-drawing vertical and right)
+\bdvl	9508	# ┤ (box-drawing vertical and left)
+\bddh	9516	# ┬ (box-drawing down and horizontal)
+\bduh	9524	# ┴ (box-drawing up and horizontal)
+
+## Suggestions for more shortcuts are welcome - please file in bug tracker ##

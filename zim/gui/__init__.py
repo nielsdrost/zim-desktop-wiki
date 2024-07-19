@@ -14,6 +14,15 @@ from gi.repository import GdkPixbuf
 from zim.config import data_dirs
 
 
+def set_icon_search_path():
+	icon_theme = Gtk.IconTheme.get_default()
+	for dir in data_dirs():
+		if dir.folder('icons').exists():
+			icon_theme.append_search_path(dir.folder('icons').path)
+
+set_icon_search_path()
+
+
 # Load custom application icons as stock
 def load_zim_stock_icons():
 	'''Function to load zim custom stock icons for Gtk. Will load all
@@ -24,8 +33,9 @@ def load_zim_stock_icons():
 	factory = Gtk.IconFactory()
 	factory.add_default()
 	for dir in data_dirs(('pixmaps')):
-		for basename in dir.list('*.png'):
-			# not all installs have svg support, so only check png for now..
+		for basename in dir.list_names():
+			if not basename.endswith('.png'):
+				continue # not all installs have svg support, so only check png for now..
 			name = 'zim-' + basename[:-4] # e.g. checked-box.png -> zim-checked-box
 			icon_theme = Gtk.IconTheme.get_default()
 			try:

@@ -47,10 +47,10 @@ External links like <http://nongnu.org> and [foo@bar.org](mailto:foo@bar.org) ar
 
 
 ![](./foobar.png)
-![](./foobar.png)
-![Foo Bar](../my-image.png)
-![](my-image.png)
-![Foo Bar](../my-image.png)
+![](./foobar.png){ height=50px }
+![Foo Bar](../my-image.png){ width=600px }
+[![](my-image.png)](Foo)
+[![Foo Bar](../my-image.png){ width=600px }](:foo:bar)
 
 ![](./equation001.png) This equation has a source .tex file
 ![](./equation002.png) for this one it is missing
@@ -59,8 +59,10 @@ External links like <http://nongnu.org> and [foo@bar.org](mailto:foo@bar.org) ar
 
 Tags: @foo @bar
 
+Anchors: [id: foo]  [#foo](#foo)  [page#foo](page#foo)
 
-#### head 4
+
+#### head 4 [id: head-4-anchor]
 
 
 * item 1
@@ -95,14 +97,15 @@ TODO list:
 
 
 * ▷ Migrated checkbox
+* ◁ Transmigrated checkbox
 
 
 A numbered list:
 
 1. foo
 2. bar
-	a. sub list
-	b. here
+	1. sub list
+	2. here
 3. hmmm
 
 
@@ -110,10 +113,10 @@ A numbered list:
 Start with number other that 1/a/A
 
 
-C. foo
-D. bar
+3. foo
+4. bar
 	3. sub item start with 3
-E. baz
+5. baz
 
 
 ##### head 5
@@ -154,6 +157,13 @@ A line in English, should be left aligned.
 aaa
 
 
+A horizontal line
+
+*****
+
+And more text
+
+
 Some Objects
 ------------
 
@@ -182,7 +192,7 @@ Multiformatting **bold**
 normal **bold** normal2
 normal ~~strike **nested bold** strike2~~ normal2
 normal ~~strike **nested bold** strike2~~ *italic [link](https://example.org)* normal2
-normal ~~strike  **nested bold** middle of the text *italic [link](https://example.org)* yet another text **another bold *yet another italic*** ~~ normal2
+normal ~~strike  **nested bold** middle of the text *italic [link](https://example.org)* yet another text **another bold *yet another italic***~~ normal2
 
 This is a [link **with** formatting](https://example.org)
 

@@ -60,21 +60,14 @@ logger = logging.getLogger('zim.plugins.attachmentbrowser')
 import zim
 
 from zim.config import XDG_CACHE_HOME
-from zim.gui.widgets import rotate_pixbuf
-
+from zim.fs import adapt_from_oldfs
 from zim.newfs import LocalFile, LocalFolder
+from zim.gui.base.images import image_file_load_pixels
 
 
-LOCAL_THUMB_STORAGE_NORMAL = XDG_CACHE_HOME.subdir('thumbnails/normal')
-LOCAL_THUMB_STORAGE_LARGE = XDG_CACHE_HOME.subdir('thumbnails/large')
-LOCAL_THUMB_STORAGE_FAIL = XDG_CACHE_HOME.subdir('thumbnails/fail/zim-%s' % zim.__version__)
-
-## XXX zim.fs --> zim.newfs
-LOCAL_THUMB_STORAGE_NORMAL = LocalFolder(LOCAL_THUMB_STORAGE_NORMAL.path)
-LOCAL_THUMB_STORAGE_LARGE = LocalFolder(LOCAL_THUMB_STORAGE_LARGE.path)
-LOCAL_THUMB_STORAGE_FAIL = LocalFolder(LOCAL_THUMB_STORAGE_FAIL.path)
-##
-
+LOCAL_THUMB_STORAGE_NORMAL = XDG_CACHE_HOME.folder('thumbnails/normal')
+LOCAL_THUMB_STORAGE_LARGE = XDG_CACHE_HOME.folder('thumbnails/large')
+LOCAL_THUMB_STORAGE_FAIL = XDG_CACHE_HOME.folder('thumbnails/fail/zim-%s' % zim.__version__)
 
 THUMB_SIZE_NORMAL = 128
 THUMB_SIZE_LARGE = 256
@@ -104,8 +97,7 @@ def pixbufThumbnailCreator(file, thumbfile, thumbsize):
 		optionskeys.append(k)
 		optionsvalues.append(v)
 	try:
-		pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(file.path, thumbsize, thumbsize)
-		pixbuf = rotate_pixbuf(pixbuf)
+		pixbuf = image_file_load_pixels(file, thumbsize, thumbsize, fail_silent=True)
 		pixbuf.savev(tmpfile.path, 'png', optionskeys, optionsvalues)
 		_atomic_rename(tmpfile.path, thumbfile.path)
 	except:

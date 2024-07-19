@@ -15,23 +15,36 @@ user can define a new command on the fly.
 '''
 
 import os
+import sys
+import re
 import logging
 from gi.repository import Gtk
 from gi.repository import GObject
 from gi.repository import GLib
 from gi.repository import GdkPixbuf
 
-import zim.fs
-from zim.fs import File, Dir, TmpFile, cleanup_filename
+from zim.fs import adapt_from_oldfs
+
+from zim.errors import Error
+from zim.newfs import FilePath, File, LocalFile, FileNotFoundError, \
+	cleanup_filename, get_mimetype_from_path
 from zim.config import XDG_CONFIG_HOME, XDG_CONFIG_DIRS, XDG_DATA_HOME, XDG_DATA_DIRS, \
-	data_dirs, SectionedConfigDict, INIConfigFile
-from zim.parsing import split_quoted_strings, uri_scheme
-from zim.applications import Application, WebBrowser, StartFile
-from zim.gui.widgets import Dialog, ErrorDialog, MessageDialog, strip_boolean_result
+	data_dirs, SectionedConfigDict, INIConfigFile, Boolean, ConfigManager
+from zim.parse.links import uri_scheme, is_uri_re, is_www_link_re, is_win32_share_re, normalize_win32_share
+from zim.applications import Application, WebBrowser, StartFile, split_quoted_strings, ApplicationLookUpError
+from zim.gui.widgets import Dialog, ErrorDialog, MessageDialog, QuestionDialog, strip_boolean_result
+
+
 
 
 logger = logging.getLogger('zim.gui.applications')
 
+ui_preferences = (
+	# key, type, category, label, default
+	('always_create_missing_dirs', 'bool', 'Interface',
+		_('Create missing directories automatically\n(If disabled you will be prompted)'), True),
+			# T: option in preferences dialog
+)
 
 def _application_file(path, dirs):
 	# Some logic to check multiple options, e.g. a path of kde-foo.desktop
@@ -56,10 +69,10 @@ def _application_dirs():
 	for dir in data_dirs('applications'):
 		yield dir
 
-	yield XDG_DATA_HOME.subdir('applications')
+	yield XDG_DATA_HOME.folder('applications')
 
 	for dir in XDG_DATA_DIRS:
-		yield dir.subdir('applications')
+		yield dir.folder('applications')
 
 
 def _create_application(dir, basename, Name, Exec, NoDisplay=True, **param):
@@ -104,17 +117,20 @@ def get_mimetype(obj):
 	@param obj: a L{File} object, or an URL
 	@returns: mimetype or C{None}
 	'''
-
-	for method in ('get_mimetype', 'mimetype'): # zim.fs.File, newfs
-		if hasattr(obj, method):
-			return getattr(obj, method)()
+	if hasattr(obj, 'mimetype'):
+		return obj.mimetype()
 	else:
 		scheme = uri_scheme(obj)
 		if scheme in (None, 'file'):
 			try:
-				return File(obj).get_mimetype()
+				return get_mimetype_from_path(FilePath(obj).uri)
 			except:
-				return None
+				try:
+					# Mal-formed or relative path, still valid mimetype from extension
+					return get_mimetype_from_path(obj)
+				except:
+					logger.exception('Failed mimetype for %s')
+					return None
 		else:
 			return "x-scheme-handler/%s" % scheme
 
@@ -269,7 +285,7 @@ class ApplicationManager(object):
 
 		file = _application_file(key, _application_dirs())
 		if file:
-			return DesktopEntryFile(File(file))
+			return DesktopEntryFile(LocalFile(file))
 		elif name == 'webbrowser':
 			return WebBrowser()
 		elif name == 'startfile':
@@ -301,11 +317,11 @@ class ApplicationManager(object):
 		if os.environ.get('XDG_CURRENT_DESKTOP'):
 			desktops = os.environ['XDG_CURRENT_DESKTOP'].split(';')
 		folders = [XDG_CONFIG_HOME] + XDG_CONFIG_DIRS
-		folders += [f.subdir('applications') for f in [XDG_DATA_HOME] + XDG_DATA_DIRS]
+		folders += [f.folder('applications') for f in [XDG_DATA_HOME] + XDG_DATA_DIRS]
 
 		for folder in folders:
 			for desktop in desktops:
-				file = folder.file('%s-mimeapps.list' % desktop)
+				file = folder.file('%s-mimeapps.list' % desktop.lower())
 				if file.exists():
 					yield file
 
@@ -391,7 +407,7 @@ class ApplicationManager(object):
 		@returns: the L{DesktopEntryFile} object with some
 		sensible defaults for a user created application entry.
 		'''
-		dir = XDG_DATA_HOME.subdir('applications')
+		dir = XDG_DATA_HOME.folder('applications')
 		param['MimeType'] = mimetype
 		basename = cleanup_filename(Name.lower()) + '-usercreated.desktop'
 		file = _create_application(dir, basename, Name, Exec, **param)
@@ -403,7 +419,7 @@ class ApplicationManager(object):
 		# should handle all file types
 		if os.name == 'nt':
 			return StartFile()
-		elif os.name == 'darwin':
+		elif sys.platform == 'darwin':
 			app = Application('open')
 		else: # linux and friends
 			app = Application('xdg-open')
@@ -422,7 +438,7 @@ class ApplicationManager(object):
 		# Don't use mimetype lookup here, this is a fallback
 		if os.name == 'nt':
 			return StartFile()
-		elif os.name == 'darwin':
+		elif sys.platform == 'darwin':
 			app = Application('open')
 		else: # linux and friends
 			app = Application('xdg-email')
@@ -472,7 +488,7 @@ class ApplicationManager(object):
 			if basename not in seen and basename not in blacklist:
 				file = _application_file(basename, dirs)
 				if file:
-					entries.append(DesktopEntryFile(File(file)))
+					entries.append(DesktopEntryFile(LocalFile(file)))
 					seen.add(basename)
 
 		for file in klass._mimeapps_files():
@@ -482,10 +498,10 @@ class ApplicationManager(object):
 					section=line.strip()
 				elif line.startswith(key):
 					if section in ('[Default Applications]', '[Added Associations]'):
-						for basename in line[len(key):].strip().split(';'):
+						for basename in [b for b in line[len(key):].strip().split(';') if b]:
 							add_entry(basename, _application_dirs())
 					elif section == '[Removed Associations]':
-						for basename in line[len(key):].strip().split(';'):
+						for basename in [b for b in line[len(key):].strip().split(';') if b]:
 							blacklist.add(basename)
 
 		for dir in _application_dirs():
@@ -494,7 +510,7 @@ class ApplicationManager(object):
 				continue
 			for line in cache.readlines():
 				if line.startswith(key):
-					for basename in line[len(key):].strip().split(';'):
+					for basename in [b for b in line[len(key):].strip().split(';') if b]:
 						add_entry(basename, (dir,))
 
 		if mimetype in ('x-scheme-handler/http', 'x-scheme-handler/https'):
@@ -510,15 +526,6 @@ class ApplicationManager(object):
 			entries = [e for e in entries if not e.nodisplay]
 
 		return entries
-
-
-from zim.errors import Error
-from zim.parsing import is_win32_share_re, is_url_re, is_uri_re, is_www_link_re
-
-from zim.fs import adapt_from_newfs, normalize_win32_share
-from zim.newfs import FileNotFoundError
-
-from zim.gui.widgets import QuestionDialog
 
 
 class NoApplicationFoundError(Error):
@@ -544,22 +551,18 @@ def open_file(widget, file, mimetype=None, callback=None):
 	ignore the specified mimetype)
 	'''
 	logger.debug('open_file(%s, %s)', file, mimetype)
-	file = adapt_from_newfs(file)
-	assert isinstance(file, (File, Dir))
-	if isinstance(file, (File)) and file.isdir():
-		file = Dir(file.path)
-
+	file = adapt_from_oldfs(file)
 	if not file.exists():
 		raise FileNotFoundError(file)
 
-	if isinstance(file, File): # File
+	if isinstance(file, File):
 		manager = ApplicationManager()
 		if mimetype is None:
-			entry = manager.get_default_application(file.get_mimetype())
+			entry = manager.get_default_application(file.mimetype())
 			if entry is not None:
 				_open_with(widget, entry, file, callback)
 			else:
-				_open_with_filebrowser(widget, file, callback)
+				_open_with_filebrowser(widget, file.uri, callback)
 
 		else:
 			entry = manager.get_default_application(mimetype)
@@ -569,7 +572,7 @@ def open_file(widget, file, mimetype=None, callback=None):
 				raise NoApplicationFoundError('No Application found for: %s' % mimetype)
 				# Do not go to fallback, we can not force
 				# mimetype for fallback
-	else: # Dir
+	else: # Folder
 		_open_with_filebrowser(widget, file, callback)
 
 
@@ -581,12 +584,20 @@ def open_folder_prompt_create(widget, folder):
 	try:
 		open_folder(widget, folder)
 	except FileNotFoundError:
-		if QuestionDialog(widget, (
-			_('Create folder?'),
-				# T: Heading in a question dialog for creating a folder
-			_('The folder "%s" does not yet exist.\nDo you want to create it now?') % folder.basename
-				# T: Text in a question dialog for creating a folder, %s will be the folder base name
-		)).run():
+		config = ConfigManager.preferences['Application']
+		config.setdefault('always_create_missing_dirs', False)
+		create_dir = config['always_create_missing_dirs']
+
+		# prompt user if we're not asked to always create directories
+		if not create_dir:
+			create_dir = QuestionDialog(widget, (
+				_('Create folder?'),
+					# T: Heading in a question dialog for creating a folder
+				_('The folder "%s" does not yet exist.\nDo you want to create it now?') % folder.basename
+					# T: Text in a question dialog for creating a folder, %s will be the folder base name
+				)).run()
+
+		if create_dir:
 			folder.touch()
 			open_folder(widget, folder)
 
@@ -599,8 +610,7 @@ def open_folder(widget, folder):
 	see L{open_folder_prompt_create} for alternative behavior when folder
 	does not exist.
 	'''
-	dir = adapt_from_newfs(folder)
-	open_file(widget, dir)
+	open_file(widget, folder)
 
 
 def open_url(widget, url):
@@ -635,7 +645,6 @@ def open_url(widget, url):
 		# Special case for outlook folder paths on windows
 		os.startfile(url)
 	else:
-		from zim.gui.applications import get_mimetype
 		manager = ApplicationManager()
 		type = get_mimetype(url) # Supports "x-scheme-handler/... for URL schemes"
 		logger.debug('Got type "%s" for "%s"', type, url)
@@ -663,9 +672,9 @@ def _open_with(widget, entry, uri, callback=None):
 		entry.spawn((uri,)) # E.g. webbrowser module does not support callback
 
 
-def _open_with_filebrowser(widget, file, callback=None):
+def _open_with_filebrowser(widget, uri, callback=None):
 	entry = ApplicationManager.get_fallback_filebrowser()
-	_open_with(widget, entry, file, callback)
+	_open_with(widget, entry, uri, callback)
 
 
 def _open_with_emailclient(widget, uri):
@@ -752,11 +761,35 @@ from zim.config import String as BaseString
 from zim.config import Boolean as BaseBoolean
 from zim.config import Float as Numeric
 
-class String(BaseString):
+
+class XDGString(BaseString):
+
+	def check(self, value):
+		if isinstance(value, str):
+			value = BaseString.check(self, value)
+			if isinstance(value, str):
+				# According to the XDG Desktop entry spec we should support
+				# the follwoing codes: \s, \n, \t, \r, and \\
+				# However, only do \\ to avoid conflicts invalid strings
+				# also no use case for other codes in keys we use (?)
+				return re.sub(r'\\\\', '\\\\', value)
+			else:
+				return value
+		else:
+			return BaseString.check(self, value)
+
+	def tostring(self, value):
+		if value is None:
+			return ''
+		else:
+			return value.replace('\\', '\\\\')
+
+
+class String(XDGString):
 
 	def check(self, value):
 		# Only ascii chars allowed in these keys
-		value = BaseString.check(self, value)
+		value = XDGString.check(self, value)
 		if isinstance(value, str):
 			try:
 				x = value.encode('ascii')
@@ -767,7 +800,7 @@ class String(BaseString):
 		return value
 
 
-class LocaleString(BaseString):
+class LocaleString(XDGString):
 	pass # utf8 already supported by default
 
 
@@ -775,7 +808,7 @@ class IconString(LocaleString):
 
 	def check(self, value):
 		if hasattr(value, 'path'):
-			return value.path  # prevent fallback via serialize_zim_config to user_path
+			return value.path  # prevent fallback via serialize_zim_config to userpath
 		else:
 			return LocaleString.check(self, value)
 
@@ -786,6 +819,31 @@ class Boolean(BaseBoolean):
 		# Desktop entry specs "true" and "false"
 		return str(value).lower()
 
+
+class TerminalLookUpError(ApplicationLookUpError):
+
+	def __init__(self, cmd):
+		self.msg = _('Cound not find terminal emulator to run application: %s') % cmd
+			# T: Error message when external application could not be run in terminal, %s is the command
+
+
+_terminal_commands = (
+	('xdg-terminal'),
+	#('x-terminal-emulator', '-x'), # Testing shows "-x" does not work as advertised :(
+	('gnome-terminal', '-x'),
+	('xterm', '-e'),
+)
+
+def _get_terminal_command(appcmd):
+	# Intended as *minimal* implementation for getting a terminal emulator.
+	# Since there is no spec how to do this lookup, don't add any complexity
+	# here other than maybe a switch per OS. Instead pull-in xdg-terminal as
+	# dependency if more sophisticated logic is needed.
+	for cmd in _terminal_commands:
+		if Application(cmd).tryexec():
+			return cmd + tuple(appcmd)
+	else:
+		raise TerminalLookUpError(appcmd[0])
 
 
 class DesktopEntryDict(SectionedConfigDict, Application):
@@ -874,6 +932,10 @@ class DesktopEntryDict(SectionedConfigDict, Application):
 		return self['Desktop Entry'].get('NoDisplay', False)
 
 	@property
+	def needsterminal(self):
+		return self['Desktop Entry'].get('Terminal', False)
+
+	@property
 	def tryexeccmd(self):
 		return self['Desktop Entry'].get('TryExec')
 
@@ -890,8 +952,7 @@ class DesktopEntryDict(SectionedConfigDict, Application):
 		if not icon:
 			return None
 
-		if isinstance(icon, File):
-			icon = icon.path
+		icon = icon.path if hasattr(icon, 'path') else icon
 
 		w, h = strip_boolean_result(Gtk.icon_size_lookup(size))
 
@@ -915,71 +976,80 @@ class DesktopEntryDict(SectionedConfigDict, Application):
 		@param args: list of either URLs or L{File} objects
 		@returns: the full command to execute as a tuple
 		'''
+		# The XDG Desktop Entry spec specifies replacement of field codes when
+		# they appear as a single argument. Handling of field codes inside
+		# arguments is explicitly left undefined. Users seem to expect these
+		# to work, so at least interpolate the values that expand to a single
+		# argument.
+
 		assert args is None or isinstance(args, (list, tuple))
 
 		def uris(args):
 			uris = []
 			for arg in args:
-				if isinstance(arg, (File, Dir)):
+				if hasattr(arg, 'uri'):
 					uris.append(arg.uri)
 				else:
 					uris.append(str(arg))
 			return uris
 
-		cmd = split_quoted_strings(self['Desktop Entry']['Exec'])
-		if args is None or len(args) == 0:
-			if '%f' in cmd:
-				cmd.remove('%f')
-			elif '%F' in cmd:
-				cmd.remove('%F')
-			elif '%u' in cmd:
-				cmd.remove('%u')
-			elif '%U' in cmd:
-				cmd.remove('%U')
-		elif '%f' in cmd:
-			assert len(args) == 1, 'application takes one file name'
-			i = cmd.index('%f')
-			cmd[i] = str(args[0])
-		elif '%F' in cmd:
-			i = cmd.index('%F')
-			for arg in reversed(list(map(str, args))):
-				cmd.insert(i, str(arg))
-			cmd.remove('%F')
-		elif '%u' in cmd:
-			assert len(args) == 1, 'application takes one url'
-			i = cmd.index('%u')
-			cmd[i] = uris(args)[0]
-		elif '%U' in cmd:
-			i = cmd.index('%U')
-			for arg in reversed(uris(args)):
-				cmd.insert(i, str(arg))
-			cmd.remove('%U')
-		else:
-			cmd.extend(list(map(str, args)))
+		cmd = []
+		seen_arg_code = False
 
-		if '%i' in cmd:
-			if 'Icon' in self['Desktop Entry'] \
-			and self['Desktop Entry']['Icon']:
-				i = cmd.index('%i')
-				cmd[i] = self['Desktop Entry']['Icon']
-				cmd.insert(i, '--icon')
+		def sub_field_code(m):
+			nonlocal seen_arg_code
+			m = m.group()
+			if m == '%f':
+				seen_arg_code = True
+				return str(args[0]) if args else ''
+			elif m == '%u':
+				seen_arg_code = True
+				return uris(args)[0] if args else ''
+			elif m == '%k':
+				return self.file.path if hasattr(self, 'file') else ''
+			elif m == '%c':
+				return self.name
 			else:
-				cmd.remove('%i')
+				return '%'
 
-		if '%c' in cmd:
-			i = cmd.index('%c')
-			cmd[i] = self.name
-
-		if '%k' in cmd:
-			i = cmd.index('%k')
-			if hasattr(self, 'file'):
-				cmd[i] = self.file.path
+		for word in split_quoted_strings(self['Desktop Entry']['Exec']):
+			# These expnd to multiple arguments and cannot be interpolated
+			if word in ('%d', '%D', '%n', '%N', '%v', '%m'):
+				continue # deprecated codes
+			elif word == '%F':
+				if args:
+					cmd.extend([str(a) for a in args])
+				seen_arg_code = True
+				continue
+			elif word == '%U':
+				if args:
+					cmd.extend([str(a) for a in uris(args)])
+				seen_arg_code = True
+				continue
+			elif word == '%i':
+				if 'Icon' in self['Desktop Entry'] \
+				and self['Desktop Entry']['Icon']:
+					cmd.extend(['--icon', self['Desktop Entry']['Icon']])
+				continue
+			elif word in ('%f', '%u') and not args:
+				seen_arg_code = True
+				continue
 			else:
-				cmd[i] = ''
+				# These can be interpolated inside arguments
+				word = re.sub('%%|%[fukc]', sub_field_code, word)
+				cmd.append(word)
+
+		if not seen_arg_code and args:
+			cmd.extend([str(a) for a in args])
 
 		return tuple(cmd)
 
-	_cmd = parse_exec # To hook into Application.spawn and Application.run
+	def _cmd(self, args):
+		# Hook into Application.spawn and Application.run
+		cmd = self.parse_exec(args)
+		if self.needsterminal:
+			cmd = _get_terminal_command(cmd)
+		return cmd
 
 	def update(self, E=(), **F):
 		'''Same as C{dict.update()}'''

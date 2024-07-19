@@ -16,12 +16,10 @@ import logging
 
 logger = logging.getLogger('zim.newfs')
 
-
 from . import FS_CASE_SENSITIVE
 from .base import *
 from .base import _EOL, SEP
 
-from zim.parsing import url_encode, URL_ENCODE_READABLE
 from zim.errors import Error
 
 
@@ -74,10 +72,7 @@ class LocalFSObjectBase(FSObjectBase):
 
 	def parent(self):
 		dirname = self.dirname
-		if dirname is None:
-			raise ValueError('Can not get parent of root')
-		else:
-			return LocalFolder(dirname, watcher=self.watcher)
+		return LocalFolder(dirname, watcher=self.watcher) if dirname else None
 
 	def ctime(self):
 		return self._stat().st_ctime
@@ -105,6 +100,9 @@ class LocalFSObjectBase(FSObjectBase):
 	def moveto(self, other):
 		# Using shutil.move instead of os.rename because move can cross
 		# file system boundaries, while rename can not
+		if not self.exists():
+			raise FileNotFoundError(self)
+
 		if isinstance(self, File):
 			if isinstance(other, Folder):
 				other = other.file(self.basename)
@@ -114,15 +112,14 @@ class LocalFSObjectBase(FSObjectBase):
 			assert isinstance(other, Folder)
 
 		if not isinstance(other, LocalFSObjectBase):
-			raise NotImplementedError('TODO: support cross object type move')
+			return self._moveto(other)
 
 		assert not other.path == self.path # case sensitive
-		logger.info('Rename %s to %s', self.path, other.path)
+		logger.info('Move file %s to %s', self.path, other.path)
 
 		if not FS_CASE_SENSITIVE \
 		and self.path.lower() == other.path.lower():
 			# Rename to other case - need in between step
-			other = self.__class__(other, watcher=self.watcher)
 			tmp = self.parent().new_file(self.basename)
 			shutil.move(self.path, tmp.path)
 			shutil.move(tmp.path, other.path)
@@ -130,7 +127,6 @@ class LocalFSObjectBase(FSObjectBase):
 			raise FileExistsError(other)
 		else:
 			# normal case
-			other = self.__class__(other, watcher=self.watcher)
 			other.parent().touch()
 			shutil.move(self.path, other.path)
 
@@ -203,6 +199,9 @@ class LocalFolder(LocalFSObjectBase, Folder):
 			raise FileNotFoundError(childpath)
 
 	def copyto(self, other):
+		if not self.exists():
+			raise FileNotFoundError(self)
+
 		assert isinstance(other, Folder)
 		assert not other.path == self.path
 
@@ -266,7 +265,7 @@ else:
 
 class AtomicWriteContext(object):
 	# Functions for atomic write as a context manager
-	# used by LocalFile.read and .readlines
+	# used by LocalFile.write and .writelines
 	# Exposed as separate object to make it testable.
 	# Should not be needed outside this module
 
@@ -335,17 +334,33 @@ class LocalFile(LocalFSObjectBase, File):
 			else:
 				raise
 
-	def read(self):
+	def read(self, size=-1):
 		try:
 			with open(self.path, mode='r', encoding='UTF-8') as fh:
 				try:
-					text = fh.read()
+					text = fh.read(size)
 				except UnicodeDecodeError as err:
 					raise FileUnicodeError(self, err)
 				else:
 					return text.lstrip('\ufeff').replace('\x00', '')
 					# Strip unicode byte order mark
 					# And remove any NULL byte since they screw up parsing
+		except IOError:
+			if not self.exists():
+				raise FileNotFoundError(self)
+			else:
+				raise
+
+	def readline(self, size=-1):
+		size = -1 if size is None else size
+		try:
+			with open(self.path, mode='r', encoding='UTF-8') as fh:
+				l = fh.readline(size)
+				return l.lstrip('\ufeff').replace('\x00', '')
+				# Strip unicode byte order mark
+				# And remove any NULL byte since they screw up parsing
+		except UnicodeDecodeError as err:
+			raise FileUnicodeError(self, err)
 		except IOError:
 			if not self.exists():
 				raise FileNotFoundError(self)
@@ -391,10 +406,13 @@ class LocalFile(LocalFSObjectBase, File):
 					fh.write('')
 
 	def copyto(self, other):
+		if not self.exists():
+			raise FileNotFoundError(self)
+
 		if isinstance(other, Folder):
 			other = other.file(self.basename)
 
-		assert isinstance(other, File)
+		assert isinstance(other, File), 'Not a file: %r' % other
 		assert other.path != self.path
 
 		logger.info('Copy %s to %s', self.path, other.path)
@@ -470,3 +488,4 @@ class TmpFile(LocalFile):
 	def __del__(self):
 		if not self.persistent:
 			self.remove(cleanup=False)
+

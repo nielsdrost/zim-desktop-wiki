@@ -14,8 +14,6 @@ from . import basedirs
 from .dicts import INIConfigFile
 
 from zim.newfs import FileNotFoundError
-from zim.fs import FileNotFoundError as oldFileNotFoundError
-
 from zim.signals import ConnectorMixin, SignalEmitter, SignalHandler, SIGNAL_NORMAL
 
 
@@ -134,14 +132,14 @@ class DefaultFileIter(object):
 
 class XDGConfigDirsIter(object):
 	'''Generator for iterating XDG config dirs
-	Yields the "zim" subdir of each XDG config file.
+	Yields the "zim" folder of each XDG config file.
 	'''
 
 	def __iter__(self):
 		from . import data_dirs # XXX
-		yield basedirs.XDG_CONFIG_HOME.subdir(('zim'))
+		yield basedirs.XDG_CONFIG_HOME.folder(('zim'))
 		for dir in basedirs.XDG_CONFIG_DIRS:
-			yield dir.subdir(('zim'))
+			yield dir.folder(('zim'))
 		for dir in data_dirs():
 			yield dir
 
@@ -242,7 +240,7 @@ class ConfigFile(ConnectorMixin, SignalEmitter):
 		'''
 		try:
 			return self.file.read()
-		except (FileNotFoundError, oldFileNotFoundError):
+		except FileNotFoundError:
 			for default in self.defaults:
 				return default.read()
 			else:
@@ -260,7 +258,7 @@ class ConfigFile(ConnectorMixin, SignalEmitter):
 		'''
 		try:
 			return self.file.readlines()
-		except (FileNotFoundError, oldFileNotFoundError):
+		except FileNotFoundError:
 			for default in self.defaults:
 				return default.readlines()
 			else:

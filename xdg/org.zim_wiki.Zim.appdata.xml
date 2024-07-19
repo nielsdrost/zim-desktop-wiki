@@ -29,12 +29,184 @@
       <li>Do brainstorming</li>
     </ul>
   </description>
-  <launchable type="desktop-id">zim.desktop</launchable>
+  <launchable type="desktop-id">org.zim_wiki.Zim.desktop</launchable>
   <url type="homepage">http://zim-wiki.org/</url>
   <screenshots>
     <screenshot type="default">http://zim-wiki.org/screenshots/zim-normal.png</screenshot>
   </screenshots>
   <releases>
+    <release date="2023-07-06" version="0.75.2">
+      <description>
+        <ul>
+          <li>Add pagename completion by words in "Jump to"</li>
+          <li>Let tasklist window remember selection state</li>
+          <li>Let tasklist window use a search bar</li>
+          <li>Add count in tasklist window</li>
+          <li>Fix auto-collapse in page index for child nodes</li>
+          <li>Fix import of gtkspellcheck</li>
+          <li>Make spellcheck more robust for page reload</li>
+          <li>Fix bug in insert screenshot</li>
+          <li>Add scrollbar to custom tool window</li>
+          <li>Fix config dirs for portable install</li>
+          <li>Use environment variable for `XDG_TEMPLATES_DIR`</li>
+          <li>Fix links to anchors on export</li>
+          <li>Fix bug in copy-paste of interwiki links</li>
+          <li>Updated diagrameditor and sequencediagrameditor plugins to generate SVG</li>
+          <li>Add keybinding for cutting the current line(s)</li>
+          <li>Fix fullscreen headerbar visibility</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2022-10-25" version="0.75.1">
+      <description>
+        <ul>
+          <li>Fix bug with relative path notebook icon</li>
+          <li>Fix bug with icons in notebookdialog</li>
+          <li>Fix bug with loading sub-notebooks via "notebook.zim"</li>
+          <li>Fix bug with "--list" commandline</li>
+          <li>Fix issue opening unicode attachements on win32</li>
+          <li>Fix saving preferences for edit bar</li>
+          <li>Fix link visibility in TableEditor</li>
+          <li>Use flatpak locale directory in flatpak</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2022-09-27" version="0.75.0">
+      <description>
+        <ul>
+          <li>Upgrade Python version requirement to &gt;= 3.6</li>
+          <li>Complete porting all modules to `zim.newfs` and deprecate `zim.fs`</li>
+          <li>Refactor APIs to deal with tokens instead of `etree` interface</li>
+          <li>Add framework for imagegenerators with inline data</li>
+          <li>Refactored ther user interface of the tasklist plugin</li>
+          <li>Make tasklist window persistent</li>
+          <li>Let tasklist window also show closed tasks</li>
+          <li>Let tasks inherit all modifiers from list heading</li>
+          <li>Let "Go to Today" use anchor id for current day</li>
+          <li>Update LinkMap with new options</li>
+          <li>Refactor preference for custom window decoration &amp; toolbar plugin</li>
+          <li>Enables distinct shortcuts for en and em dashes in symbol list</li>
+          <li>Add unicode 8757 ("because") in symbol list</li>
+          <li>Move Selected Text: add preference for short links &amp; save bounds</li>
+          <li>Extend ToC pane context menu</li>
+          <li>Score editor: add check for convert-ly</li>
+          <li>Source View plugin: Don't show hidden languages</li>
+          <li>Export code blocks in markdown as fenced blocks</li>
+          <li>Fix loading GIF images</li>
+          <li>Fix to let the "insert link" dialog allow anchors</li>
+          <li>Allow sidepane focus key to be configured</li>
+          <li>Added action to collapse and expand in PageIndex</li>
+          <li>Add action for "move text" to allow keybinding</li>
+          <li>Support closing an open 'find bar' by pressing ESC in the page view widget</li>
+          <li>Allow cancelling ImageGeneratorDialog using Escape key</li>
+          <li>Version control: fix fossil</li>
+          <li>Fix KDE drag-n-drop bug</li>
+          <li>Fix export with formatting in heading</li>
+          <li>Minimal support for "Terminal" option in desktop files</li>
+          <li>Add preference for not prompting on new folder</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2021-12-07" version="0.74.3">
+      <description>
+        <ul>
+          <li>Fix issue with broken links on move page</li>
+          <li>Fix bug in copy-paste</li>
+          <li>Fix bug on move page for existing textbuffer</li>
+          <li>Fix bug with saving of notebook editable state</li>
+          <li>Fix for error while loading plugins</li>
+          <li>Fix issue with stray unicode character</li>
+          <li>Fix issue to allow relative document root</li>
+          <li>Fix hack for rendering sourceview blocks</li>
+          <li>Add mnemonic keys to open sidepane tabs</li>
+          <li>Add links and screenshot to macOS app &amp; update README information</li>
+          <li>Improve inline rendering of equations &amp; make image DPI confingurable</li>
+          <li>Add box drawing characters to symbols list</li>
+          <li>Scroll on moving lines with linesorter plugin</li>
+          <li>Move floating table of contents to overlay layer</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2021-10-11" version="0.74.2">
+      <description>
+        <ul>
+          <li>Let Toolbar plugin also remove window decoration</li>
+          <li>Fix execution of custom tools from Toolbar</li>
+          <li>Add plugin "view" items to Toolbar plugin</li>
+          <li>Make drag&amp;drop optional in the pageindex</li>
+          <li>Add option to toggle tooltips for index panes</li>
+          <li>Fix Zeitgeist plugin to work with Gtk3 branch</li>
+          <li>Improve dialog feedback for invalid input</li>
+          <li>Fix error on cancel insert dialog</li>
+          <li>Let exceptions not block search</li>
+          <li>Make page parser robust for empty files</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2021-09-23" version="0.74.1">
+      <description>
+        <ul>
+          <li>Add preference to hide edit bar</li>
+          <li>Add separate parameter for wrapped lines linespacing</li>
+          <li>Fix behavior of copying images on copy-paste</li>
+          <li>Fix export of anchors to make valid HTML tags</li>
+          <li>Fix storing of uistate for window panes</li>
+          <li>Fix issues for "file:/path" file URIs</li>
+          <li>Fix bug in "copy link"</li>
+          <li>Make clipboard handling robust for non-local file URI</li>
+          <li>Fix issue with escaping in find input</li>
+          <li>Fix behavior of TrashDialog on error</li>
+          <li>Remove string literal formatting syntax</li>
+        </ul>
+      </description>
+    </release>
+    <release date="2021-09-14" version="0.74.0">
+      <description>
+        <ul>
+          <li>Support link "anchors" to allow linking within page</li>
+          <li>Add new-style headerbar as window decoration</li>
+          <li>Add auto-hiding headerbar in full screen mode </li>
+          <li>Add confirmation dialog when trashing pages</li>
+          <li>Replace toolbar by a plugin, introduce "Edit Bar" in pageview</li>
+          <li>Remove statusbar</li>
+          <li>Make single page window editable</li>
+          <li>Keep undostack for the last 10 pages</li>
+          <li>Copy equations on copy-paste</li>
+          <li>Copy image attachments on copy-paste</li>
+          <li>Update relative links on copy-paste formatted text</li>
+          <li>Fix copy-pasting links to another notebook</li>
+          <li>Add Bullet Journal "back arrow" checkbox</li>
+          <li>Add default browser to preferences</li>
+          <li>Add option to paste short relative link names</li>
+          <li>Add support for "INCLUDE file" in templates</li>
+          <li>Add `&lt;Ctrl&gt;&lt;Shift&gt;C` for copying the current line</li>
+          <li>Show plugins that failed to load in the plugin list</li>
+          <li>Add auto-expand and -collapse options to tags plugin</li>
+          <li>Add option for horizontal scrollbar to pageindex &amp; tags plugins</li>
+          <li>Add "open backlink in new window" in backlinks plugin</li>
+          <li>Add count and full path options for backlinks plugin</li>
+          <li>Add rename and delete menu entries in attachmentbrowser</li>
+          <li>Improve language selection for sourceview plugin</li>
+          <li>Add border width preference to sourceview plugin</li>
+          <li>Add dark mode preference to equation editor</li>
+          <li>Add Toolbar plugin, including "classic" mode</li>
+          <li>Add Command Palette plugin</li>
+          <li>Also match URL in wiki text for local network</li>
+          <li>Improve read performance for large text attachments</li>
+          <li>Fix issue with unicode mismatch in link and page names</li>
+          <li>Make indexer robust against false folder mtime</li>
+          <li>Make windows installer robust against overwriting data</li>
+          <li>Try to use GtkSourceView 4.x if 3.x not found</li>
+          <li>Fix numbered lists with letters in Markdown export</li>
+          <li>Use Pillow fallback to load WebP images</li>
+          <li>Make appending to page undo-able</li>
+          <li>Highlight "Toggle Editable" button when read-only</li>
+          <li>Add extensions on PageWindow by splitting NotebookView and PageView</li>
+          <li>Show link destination for keyboard navigation</li>
+          <li>Exclude formatting when copying headings</li>
+        </ul>
+      </description>
+    </release>
     <release date="2021-01-30" version="0.73.5">
       <description>
         <ul>

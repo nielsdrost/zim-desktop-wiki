@@ -9,6 +9,7 @@ from gi.repository import Gdk
 from gi.repository import Pango
 
 import re
+import weakref
 import logging
 
 
@@ -17,9 +18,8 @@ logger = logging.getLogger('zim.plugin.tableeditor')
 from zim.plugins import PluginClass, InsertedObjectTypeExtension
 from zim.actions import action
 from zim.signals import SignalEmitter, ConnectorMixin, SIGNAL_RUN_LAST
-from zim.utils import WeakSet, natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 from zim.config import String
-from zim.main import ZIM_APPLICATION
 from zim.formats import ElementTreeModule as ElementTree
 from zim.formats import TABLE, HEADROW, HEADDATA, TABLEROW, TABLEDATA
 from zim.formats.wiki import Parser as WikiParser
@@ -41,10 +41,10 @@ SYNTAX_WIKI_PANGO2 = [
 	(r'<mark>\1</mark>', r'<span background="yellow">\1</span>', r'__\1__'),
 	(r'<code>\1</code>', r'<tt>\1</tt>', r"''\1''"),
 	(r'<strike>\1</strike>', r'<s>\1</s>', r'~~\1~~'),
-	# Link url without link text  - Link url has always size = 0
-	(r'<link href="\1">\1</link>', r'<span foreground="blue">\1<span size="0">\1</span></span>', r'[[\1]]'),
-	# Link url with link text  - Link url has always size = 0
-	(r'<link href="\1">\2</link>', r'<span foreground="blue">\2<span size="0">\1</span></span>', r'[[\2|\1]]'),
+	# Link url without link text  - Link url has always size = 1 to stay hidden FIXME: hacky
+	(r'<link href="\1">\1</link>', r'<span foreground="blue">\1<span size="1">\1</span></span>', r'[[\1]]'),
+	# Link url with link text  - Link url has always size = 1 to stay hidden FIXME: hacky
+	(r'<link href="\1">\2</link>', r'<span foreground="blue">\2<span size="1">\1</span></span>', r'[[\2|\1]]'),
 	(r'<emphasis>\1</emphasis>', r'<i>\1</i>', r'//\1//')
 ]
 
@@ -61,8 +61,8 @@ def reg_replace(string):
 	:param string: target pattern
 	:return:source pattern
 	'''
-	string = string.replace('*', '\*').replace('[', '\[').replace(']', '\]') \
-		.replace(r'\1', '(.+?)', 1).replace(r'\2', '(.+?)', 1).replace('|', '\|')
+	string = string.replace('*', r'\*').replace('[', r'\[').replace(']', r'\]') \
+		.replace(r'\1', '(.+?)', 1).replace(r'\2', '(.+?)', 1).replace('|', r'\|')
 	return re.compile(string)
 
 # Regex compiled search patterns
@@ -160,7 +160,7 @@ class TableViewObjectType(InsertedObjectTypeExtension):
 	}
 
 	def __init__(self, plugin, objmap):
-		self._widgets = WeakSet()
+		self._widgets = weakref.WeakSet()
 		self.preferences = plugin.preferences
 		InsertedObjectTypeExtension.__init__(self, plugin, objmap)
 		self.connectto(self.preferences, 'changed', self.on_preferences_changed)
@@ -228,7 +228,7 @@ class TableViewObjectType(InsertedObjectTypeExtension):
 			builder.end(tag)
 
 		builder.start(TABLE, dict(attrib))
-		builder.start(HEADROW)
+		builder.start(HEADROW, {})
 		for header in headers:
 			append(HEADDATA, header)
 		builder.end(HEADROW)
@@ -323,6 +323,7 @@ class TableViewWidget(InsertedObjectWidget):
 
 	def __init__(self, model):
 		InsertedObjectWidget.__init__(self)
+		self.expand = False
 		self.textarea_width = 0
 		self.model = model
 
@@ -476,7 +477,7 @@ class TableViewWidget(InsertedObjectWidget):
 				button.set_tooltip_text(tooltip)
 				toolbar.insert(button, pos)
 
-		toolbar.set_size_request(300, -1)
+		toolbar.set_size_request(-1, -1)
 		toolbar.set_icon_size(Gtk.IconSize.MENU)
 
 		return toolbar
@@ -706,13 +707,19 @@ class TableViewWidget(InsertedObjectWidget):
 			model.set_value(newiter, col, value)
 			model.set_value(treeiter, col, newvalue)
 
+		# Move cursor to the new position of the moved row
+		nextiter = model.iter_next(treeiter) if direction > 0 else model.iter_previous(treeiter)
+		path = model.get_path(nextiter)
+		self.treeview.set_cursor(path, None, True)
+
 	def on_open_link(self, action, link):
 		''' Context menu: Open a link, which is written in a cell '''
 		self.emit('link-clicked', {'href': str(link)})
 
 	def on_open_help(self, action):
 		''' Context menu: Open help '''
-		ZIM_APPLICATION.run('--manual', 'Plugins:Table Editor')
+		application = self.get_toplevel().get_application()
+		application.open_manual('Plugins:Table Editor')
 
 	def on_change_columns(self, action):
 		''' Context menu: Edit table, run the EditTableDialog '''

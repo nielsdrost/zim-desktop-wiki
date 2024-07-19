@@ -7,6 +7,7 @@
 # !! NOTE: when changing this plugin, do test performance on a folder with lots of photos!
 #
 # ChangeLog
+# 2021-01-16 Added rename and delete functionality to file browsers context menu (Thomas Engel)
 # 2015-10-04 Reworked threads to better avoid blocking user interface (Jaap)
 # 2013-03-03 Change to new plugin extension structure (Jaap)
 # 2013-02-25 Added zooming icon size, made icon rendering more robust (Jaap)
@@ -26,7 +27,6 @@
 # 2010-06-29 1st working version
 #
 # TODO:
-# [ ] Action for deleting files in context menu
 # [ ] Copy / cut files in context menu
 # [ ] Button to clean up the folder - only show when the folder is empty
 # [ ] Avoid scaling up small images when thumbnailing (check spec on this)
@@ -47,8 +47,8 @@ from zim.actions import toggle_action
 from zim.gui.pageview import PageViewExtension
 from zim.gui.applications import open_folder_prompt_create
 
-from zim.gui.widgets import BOTTOM_PANE, PANE_POSITIONS, \
-	IconButton, ScrolledWindow, \
+from zim.gui.widgets import RIGHT_PANE, PANE_POSITIONS, \
+	IconButton, ScrolledWindow, StatusPage, \
 	WindowSidePaneWidget, uistate_property
 
 
@@ -71,13 +71,15 @@ class AttachmentBrowserPlugin(PluginClass):
 This plugin shows the attachments folder of the current page as an
 icon view at bottom pane.
 '''), # T: plugin description
-		'author': 'Thorsten Hackbarth <thorsten.hackbarth@gmx.de>\nJaap Karssenberg <jaap.karssenberg@gmail.com>',
+		'author': 'Thorsten Hackbarth <thorsten.hackbarth@gmx.de>\n'
+			      'Jaap Karssenberg <jaap.karssenberg@gmail.com>\n'
+				  'Thomas Engel <realdatenwurm@gmail.com>',
 		'help': 'Plugins:Attachment Browser',
 	}
 
 	plugin_preferences = (
 		# key, type, label, default
-		('pane', 'choice', _('Position in the window'), BOTTOM_PANE, PANE_POSITIONS),
+		('pane', 'choice', _('Position in the window'), RIGHT_PANE, PANE_POSITIONS),
 			# T: option for plugin preferences
 		('use_thumbnails', 'bool', _('Use thumbnails'), True),
 			# T: option for plugin preferences
@@ -120,17 +122,18 @@ class AttachmentBrowserWindowExtension(PageViewExtension):
 		self.widget.iconview.teardown_folder()
 
 
-class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
+class AttachmentBrowserPluginWidget(Gtk.Box, WindowSidePaneWidget):
 	'''Wrapper aroung the L{FileBrowserIconView} that adds the buttons
 	for zoom / open folder / etc. ...
 	'''
 
-	title = _('Attachments') # T: label for attachment browser pane
+	title = _('Atta_chments') # T: label for attachment browser pane
 
 	icon_size = uistate_property('icon_size', DEFAULT_ICON_ZOOM)
 
 	def __init__(self, extension, opener, preferences):
-		GObject.GObject.__init__(self)
+		Gtk.Box.__init__(self, Gtk.Orientation.VERTICAL)
+		self.set_homogeneous(False)
 		self.extension = extension # XXX
 		self.opener = opener
 		self.uistate = extension.uistate
@@ -138,12 +141,21 @@ class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
 		self._close_button = None
 
 		self.iconview = FileBrowserIconView(opener, self.icon_size)
-		self.add(ScrolledWindow(self.iconview, shadow=Gtk.ShadowType.NONE))
+		self._stack = Gtk.Stack()
+		for name, widget in (
+			('iconview', ScrolledWindow(self.iconview, shadow=Gtk.ShadowType.NONE)),
+			('placeholder', StatusPage('folder-symbolic', _('No attachments'))), # T: placeholder label for sidepane
+		):
+			widget.show_all()
+			self._stack.add_named(widget, name)
+		self._stack.set_visible_child_name('placeholder')
+
+		self.pack_start(self._stack, True, True, 0)
 
 		self.on_preferences_changed()
 		self.preferences.connect('changed', self.on_preferences_changed)
 
-		self.buttonbox = Gtk.VBox()
+		self.buttonbox = Gtk.Box(Gtk.Orientation.HORIZONTAL)
 		self.pack_end(self.buttonbox, False, True, 0)
 
 		open_folder_button = IconButton(Gtk.STOCK_OPEN, relief=False)
@@ -165,7 +177,13 @@ class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
 
 		self.set_icon_size(self.icon_size)
 
-		self.iconview.connect('folder-changed', lambda o: self.update_title())
+		self.iconview.connect('folder-changed', lambda o: self.update_status())
+
+	def set_orientation(self, orientation):
+		Gtk.Box.set_orientation(self, orientation)
+		self.buttonbox.set_orientation(
+			Gtk.Orientation.VERTICAL if orientation is Gtk.Orientation.HORIZONTAL else Gtk.Orientation.HORIZONTAL
+		) # reverse of widget orientation
 
 	def on_preferences_changed(self, *a):
 		self.iconview.set_use_thumbnails(self.preferences['use_thumbnails'])
@@ -173,16 +191,28 @@ class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
 
 	def set_folder(self, folder):
 		self.iconview.set_folder(folder)
-		self.update_title()
+		self.update_status()
 
-	def update_title(self):
+	def update_status(self):
 		n = len(self.iconview.get_model())
-		self.set_title(ngettext('%i Attachment', '%i Attachments', n) % n)
+		self.set_info(ngettext('%i Atta_chment', '%i Atta_chments', n) % n)
 		# T: Label for the statusbar, %i is the number of attachments for the current page
+
+		if n == 0:
+			self._stack.set_visible_child_name('placeholder')
+			self.zoomin_button.set_sensitive(False)
+			self.zoomout_button.set_sensitive(False)
+		else:
+			self._stack.set_visible_child_name('iconview')
+			self.zoomin_button.set_sensitive(self.icon_size < THUMB_SIZE_LARGE)
+			self.zoomout_button.set_sensitive(self.icon_size > MIN_ICON_ZOOM)
 
 	def set_embeded_closebutton(self, button):
 		if self._close_button:
 			self.buttonbox.remove(self._close_button)
+
+		if self.get_orientation() == Gtk.Orientation.VERTICAL:
+			return False
 
 		if button is not None:
 			self.buttonbox.pack_start(button, False, True, 0)
@@ -198,7 +228,7 @@ class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
 
 	def on_refresh_button(self):
 		self.iconview.refresh()
-		self.update_title()
+		self.update_status()
 
 	def on_zoom_in(self):
 		self.set_icon_size(
@@ -210,8 +240,6 @@ class AttachmentBrowserPluginWidget(Gtk.HBox, WindowSidePaneWidget):
 
 	def set_icon_size(self, icon_size):
 		self.iconview.set_icon_size(icon_size)
-		self.zoomin_button.set_sensitive(False)
-		self.zoomout_button.set_sensitive(False)
 		self.zoomin_button.set_sensitive(icon_size < THUMB_SIZE_LARGE)
 		self.zoomout_button.set_sensitive(icon_size > MIN_ICON_ZOOM)
 		self.icon_size = icon_size # Do this last - avoid store state after fail

@@ -10,7 +10,7 @@ from gi.repository import Gtk
 
 from zim.plugins import PluginManager
 from zim.gui.widgets import Dialog, get_window, InputForm
-from zim.parsing import is_interwiki_keyword_re
+from zim.parse.links import is_interwiki_keyword_re
 
 notebook_properties = (
 	('name', 'string', _('Name')), # T: label for properties dialog
@@ -18,13 +18,15 @@ notebook_properties = (
 	('home', 'page', _('Home Page')), # T: label for properties dialog
 	('icon', 'image', _('Icon')), # T: label for properties dialog
 	('document_root', 'dir', _('Document Root')), # T: label for properties dialog
+	('short_links', 'bool', _('Prefer short names for page links'), False), # T: label for properties dialog
+	('disable_trash', 'bool', _('Do not use system trash for this notebook'), False) # T: label for properties dialog
 	# 'shared' property is not shown in properties anymore
 )
 
 
 class PropertiesDialog(Dialog):
 
-	def __init__(self, parent, notebook):
+	def __init__(self, parent, notebook, chosen_plugin=None):
 		Dialog.__init__(self, parent, _('Properties'), help='Help:Properties') # T: Dialog title
 		self.notebook = notebook
 
@@ -37,17 +39,23 @@ class PropertiesDialog(Dialog):
 		hbox.add(stack)
 		self.vbox.add(hbox)
 
+		def add_widget(form, name, title):
+			if chosen_plugin and chosen_plugin != name:
+				return
+			if self.notebook.readonly:
+				for widget in list(form.widgets.values()):
+					widget.set_sensitive(False)
+			box = Gtk.VBox()
+			box.pack_start(form, False, False, 0)
+			stack.add_titled(box, name, title)
+
 		self.form = InputForm(
 			inputs=notebook_properties,
 			values=notebook.config['Notebook']
 		)
 		self.form.widgets['icon'].set_use_relative_paths(self.notebook)
-		if self.notebook.readonly:
-			for widget in list(self.form.widgets.values()):
-				widget.set_sensitive(False)
-		box = Gtk.VBox()
-		box.pack_start(self.form, False, False, 0)
-		stack.add_titled(box, 'notebook', _('Notebook'))
+		self.form.widgets['document_root'].set_use_relative_paths(self.notebook)
+		add_widget(self.form, 'notebook', _('Notebook'))
 
 		self.plugin_forms = {}
 		plugins = PluginManager()
@@ -60,19 +68,15 @@ class PropertiesDialog(Dialog):
 					values=notebook.config[key]
 				)
 				self.plugin_forms[key] = form
-				if self.notebook.readonly:
-					for widget in list(form.widgets.values()):
-						widget.set_sensitive(False)
-
-				box = Gtk.VBox()
-				box.pack_start(form, False, False, 0)
-				stack.add_titled(box, name, plugin.plugin_info['name'])
+				add_widget(form, name, plugin.plugin_info['name'])
 
 	def do_response_ok(self):
 		if not self.notebook.readonly:
 			properties = self.form.copy()
+			properties['icon'] = self.form.widgets['icon'].get_text() # XXX should be file, but resolves relative
+			properties['document_root'] = self.form.widgets['document_root'].get_text() # XXX should be file, but resolves relative
 
-			self.notebook.save_properties(**properties)
+			self.notebook.properties.update(properties)
 
 			for key, form in self.plugin_forms.items():
 				self.notebook.config[key].update(form)

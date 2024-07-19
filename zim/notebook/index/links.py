@@ -1,14 +1,33 @@
 
 # Copyright 2009-2017 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
+'''
+Links come in 3 flavors:
+1/ HREF_REL_ABSOLUTE - starting from the top level e.g. ":foo"
+2/ HREF_REL_FLOATING - relative to the source namespace, or parents, e.g. "foo"
+3/ HREF_REL_RELATIVE - below the source page, e.g. "+foo"
 
+If the target page does not exist, a "placeholder" is created for this
+page.
+
+Floating links are resolved to existing pages in parent namespaces
+therefore they may need to be recalculated when pages of the same name
+are created or deleted. This is done by the 'anchorkey' field in the
+links table.
+To avoid circular dependencies between the existance of placeholder
+pages and links, floating links do /not/ resolve to placeholders,
+but only to existing links.
+(Else we would need to drop all placeholders and
+re-calculate all links on every page index to ensure the outcome.)
+'''
 
 import logging
+import sqlite3
 
 logger = logging.getLogger('zim.notebook.index')
 
 
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 from zim.notebook.page import Path, HRef, \
 	HREF_REL_ABSOLUTE, HREF_REL_FLOATING, HREF_REL_RELATIVE
 
@@ -21,27 +40,6 @@ LINK_DIR_FORWARD = 1 #: Constant for forward links
 LINK_DIR_BACKWARD = 2 #: Constant for backward links
 LINK_DIR_BOTH = 3 #: Constant for links in any direction
 
-
-# Links come in 3 flavors:
-# 1/ HREF_REL_ABSOLUTE - starting from the top level e.g. ":foo"
-# 2/ HREF_REL_FLOATING - relative to the source namespace, or parents, e.g. "foo"
-# 3/ HREF_REL_RELATIVE - below the source page, e.g. "+foo"
-#
-# If the target page does not exist, a "placeholder" is created for this
-# page.
-#
-# Floating links are resolved to existing pages in parent namespaces
-# therefore they may need to be recalculated when pages of the same name
-# are created or deleted. This is done by the 'anchorkey' field in the
-# links table.
-# To avoid circular dependencies between the existance of placeholder
-# pages and links, floating links do /not/ resolve to placeholders,
-# but only to existing links.
-# (Else we would need to drop all placeholders and
-# re-calculate all links on every page index to ensure the outcome.)
-
-
-
 class IndexLink(object):
 	'''Class used to represent links between two pages
 
@@ -51,7 +49,7 @@ class IndexLink(object):
 
 	__slots__ = ('source', 'target')
 
-	def __init__(self, source, target):
+	def __init__(self, source: Path, target: Path):
 		self.source = source
 		self.target = target
 
@@ -98,13 +96,18 @@ class LinksIndexer(IndexerBase):
 			'DELETE FROM links WHERE source=?',
 			(row['id'],)
 		)
-		for href in doc.iter_href():
+		for href in doc.iter_href(include_anchors=False):
+			assert href.parts()  # links cannot be only anchor
 			anchorkey = natural_sort_key(href.parts()[0])
-			self.db.execute(
-				'INSERT INTO links(source, target, rel, names, anchorkey, needscheck) '
-				'VALUES (?, ?, ?, ?, ?, ?)',
-				(row['id'], ROOT_ID, href.rel, href.names, anchorkey, 1)
-			)
+			try:
+				#print("INSERT INTO links(%d, %d, %d, %s,...)" % (row['id'], ROOT_ID, href.rel, href.names))
+				self.db.execute(
+					'INSERT INTO links(source, target, rel, names, anchorkey, needscheck) '
+					'VALUES (?, ?, ?, ?, ?, ?)',
+					(row['id'], ROOT_ID, href.rel, href.names, anchorkey, 1)
+				)
+			except sqlite3.IntegrityError:
+				logger.exception('Integrity error when inserting link (%d,%d,%d,%s)', row['id'], ROOT_ID, href.rel, href.names)
 
 	def on_page_row_inserted(self, o, row):
 		# Placeholders for pages of the same name need to be
@@ -121,20 +124,36 @@ class LinksIndexer(IndexerBase):
 	def on_page_row_changed(self, o, newrow, oldrow):
 		if oldrow['is_link_placeholder'] and not newrow['is_link_placeholder']:
 			self.on_page_row_inserted(o, newrow)
+		elif not oldrow['is_link_placeholder'] and newrow['is_link_placeholder'] and newrow['n_children'] > 0:
+			# Re-calc links to children, might result in this this page being deleted fully
+			# if children no longer resolve here due to new placeholder status
+			self._recursive_flag_links_for_update(newrow)
+		else:
+			pass
+
+	def _recursive_flag_links_for_update(self, row):
+		self.db.execute(
+			'UPDATE links SET needscheck=1, target=? WHERE target=?',
+			(ROOT_ID, row['id'],)
+		) # Need to link somewhere, if target is gone, use ROOT instead
+		for child in self.db.execute(
+			'SELECT * FROM pages WHERE parent=?',
+			(row['id'],)
+		).fetchall():
+			self._recursive_flag_links_for_update(child) # recurs
 
 	def on_page_row_deleted(self, o, row):
 		# Drop all outgoing links, flag incoming links to be checked.
 		# Check could result in page being re-created as placeholder
 		# at end of db update.
-		if not row['is_link_placeholder']:
-			self.db.execute(
-				'DELETE FROM links WHERE source=?',
-				(row['id'],)
-			)
-			self.db.execute(
-				'UPDATE links SET needscheck=1, target=? WHERE target=?',
-				(ROOT_ID, row['id'],)
-			) # Need to link somewhere, if target is gone, use ROOT instead
+		self.db.execute(
+			'DELETE FROM links WHERE source=?',
+			(row['id'],)
+		)
+		self.db.execute(
+			'UPDATE links SET needscheck=1, target=? WHERE target=?',
+			(ROOT_ID, row['id'],)
+		) # Need to link somewhere, if target is gone, use ROOT instead
 
 	def is_uptodate(self):
 		row = self.db.execute(
@@ -148,7 +167,7 @@ class LinksIndexer(IndexerBase):
 			SELECT DISTINCT pages.* FROM pages INNER JOIN links ON pages.id=links.source
 			WHERE pages.source_file IS NULL
 		''').fetchall():
-			logger.warn('Found ghost links from: %s', row['name'])
+			logger.warning('Found ghost links from: %s', row['name'])
 			self.on_page_row_deleted(None, row)
 			yield
 

@@ -136,6 +136,7 @@ if [[ ! "${__skip_msys_deps}" = true ]] && [[ "${MSYSTEM_CARCH:-}" ]]; then
       mingw-w64-"${MSYSTEM_CARCH}"-python-xdg \
       mingw-w64-"${MSYSTEM_CARCH}"-gtksourceview3 \
       mingw-w64-"${MSYSTEM_CARCH}"-python-pip \
+      mingw-w64-"${MSYSTEM_CARCH}"-python-wheel \
       mingw-w64-"${MSYSTEM_CARCH}"-nsis
 
 fi
@@ -155,7 +156,7 @@ __build_dir=${__dir}/build
 __venv_dir=${__build_dir}/venv
 
 rm -rf "${__venv_dir}"
-python3 -m venv --prompt Zim "${__venv_dir}"
+python3 -m venv --prompt Zim "${__venv_dir}" --system-site-packages
 
 info "Entering virtual environment ..."
 
@@ -165,7 +166,7 @@ source "${__venv_dir}/bin/activate"
 info "Initializing virtual environment ..."
 
 python -m pip install -U pip
-pip install PyGObject pyinstaller==3.6 # Fix pyinstaller version, latest has bug
+pip install --require-virtualenv pyinstaller
 
 info "Checking virtual environment ..."
 
@@ -178,6 +179,12 @@ check_module \
 check_module \
   "from gi.repository import Gtk" \
   "Gtk3 is not installed in a way it can be loaded in Python"
+
+info "Installing python modules for plugins ..."
+
+# for linkmap, see https://github.com/zim-desktop-wiki/zim-desktop-wiki/issues/2012
+pacman -R --noconfirm mingw-w64-x86_64-python-numpy || echo 'skipped due to mingw-w64-x86_64-python-numpy not exist.'
+pip install xdot numpy
 
 info "Determining Zim version ..."
 

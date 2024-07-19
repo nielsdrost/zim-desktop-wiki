@@ -12,19 +12,19 @@ from gi.repository import Gtk
 from gi.repository import GObject
 from gi.repository import GdkPixbuf
 
-
+import re
 import logging
 
 from functools import partial
 
 
-from zim.fs import File, TmpFile, cleanup_filename
-from zim.parsing import split_quoted_strings
+from zim.newfs import FilePath, LocalFile, TmpFile, cleanup_filename
 from zim.config import ConfigManager, XDG_CONFIG_HOME, INIConfigFile
 from zim.signals import SignalEmitter, SIGNAL_NORMAL, SignalHandler
 
+from zim.applications import split_quoted_strings
 from zim.gui.applications import Application, DesktopEntryDict, String, Boolean
-from zim.gui.widgets import Dialog, IconButton, IconChooserButton
+from zim.gui.widgets import Dialog, IconButton, IconChooserButton, ScrolledWindow
 
 import zim.errors
 
@@ -142,7 +142,7 @@ class CustomToolManager(SignalEmitter):
 
 		@returns: a new L{CustomTool} object.
 		'''
-		dir = XDG_CONFIG_HOME.subdir('zim/customtools')
+		dir = XDG_CONFIG_HOME.folder('zim/customtools')
 		basename = cleanup_filename(Name.lower()) + '-usercreated.desktop'
 		tool = _create_application(dir, basename, Name, '', NoDisplay=False, **properties)
 
@@ -198,6 +198,27 @@ class CustomToolManager(SignalEmitter):
 		# This is intended behavior to make all moves possible.
 		self._write_list()
 
+	def run_custom_tool(self, widget, tool):
+		'''Convenience wrapper for run a customtool from a widget
+		@param widget: a Gtk widget which is supposed to be in the same window
+		as the pageview for which the tool should run
+		@param tool: a custom tool, either by name or as object
+		'''
+		if isinstance(tool, str):
+			tool = self.get_tool(tool)
+
+		logger.info('Execute custom tool %s', tool.name)
+		try:
+			window = widget.get_toplevel()
+			pageview = window.pageview
+		except:
+			pageview = widget # fall back mostly for mock testing
+		notebook, page = pageview.notebook, pageview.page
+		try:
+			tool.run(notebook, page, pageview)
+		except:
+			zim.errors.exception_handler(
+				'Exception during action: %s' % tool.name)
 
 
 from zim.config import Choice
@@ -211,6 +232,7 @@ class CustomToolDict(DesktopEntryDict):
 		- C{%f} for source file as tmp file current page
 		- C{%d} for attachment directory
 		- C{%s} for real source file (if any)
+		- C{%p} for the page name
 		- C{%n} for notebook location (file or directory)
 		- C{%D} for document root
 		- C{%t} for selected text or word under cursor
@@ -288,60 +310,72 @@ class CustomToolDict(DesktopEntryDict):
 			# assert statement could be optimized away
 		notebook, page, pageview = args
 
-		cmd = split_quoted_strings(self['Desktop Entry']['X-Zim-ExecTool'])
-		if '%f' in cmd:
-			self._tmpfile = TmpFile('tmp-page-source.txt')
-			self._tmpfile.writelines(page.dump('wiki'))
-			cmd[cmd.index('%f')] = self._tmpfile.path
-
-		if '%d' in cmd:
-			dir = notebook.get_attachments_dir(page)
-			if dir:
-				cmd[cmd.index('%d')] = dir.path
+		def sub_field_code(m):
+			m = m.group()
+			if m == '%f':
+				self._tmpfile = TmpFile('tmp-page-source.txt')
+				self._tmpfile.writelines(page.dump('wiki'))
+				return self._tmpfile.path
+			elif m == '%d':
+				dir = notebook.get_attachments_dir(page)
+				return dir.path if dir else ''
+			elif m == '%s':
+				return page.source_file.path if page.source_file else ''
+			elif m == '%p':
+				return page.name
+			elif m == '%n':
+				return FilePath(notebook.uri).path
+			elif m == '%D':
+				return notebook.document_root.path if notebook.document_root else ''
+			elif m == '%t':
+				if pageview is not None:
+					text = pageview.get_selection() or pageview.get_word()
+					return text or ''
+				else:
+					return ''
+			elif m == '%T':
+				if pageview is not None:
+					text = pageview.get_selection(format='wiki') or pageview.get_word(format='wiki')
+					return text or ''
+				else:
+					return ''
 			else:
-				cmd[cmd.index('%d')] = ''
+				return '%'
 
-		if '%s' in cmd:
-			if hasattr(page, 'source') and isinstance(page.source, File):
-				cmd[cmd.index('%s')] = page.source.path
-			else:
-				cmd[cmd.index('%s')] = ''
-
-		if '%p' in cmd:
-			cmd[cmd.index('%p')] = page.name
-
-		if '%n' in cmd:
-			cmd[cmd.index('%n')] = File(notebook.uri).path
-
-		if '%D' in cmd:
-			dir = notebook.document_root
-			if dir:
-				cmd[cmd.index('%D')] = dir.path
-			else:
-				cmd[cmd.index('%D')] = ''
-
-		if '%t' in cmd:
-			text = pageview.get_selection() or pageview.get_word()
-			cmd[cmd.index('%t')] = text or ''
-			# FIXME - need to substitute this in arguments + url encoding
-
-		if '%T' in cmd:
-			text = pageview.get_selection(format='wiki') or pageview.get_word(format='wiki')
-			cmd[cmd.index('%T')] = text or ''
-			# FIXME - need to substitute this in arguments + url encoding
+		cmd = []
+		for word in split_quoted_strings(self['Desktop Entry']['X-Zim-ExecTool']):
+			word = re.sub('%%|%[fdspnDtT]', sub_field_code, word)
+			cmd.append(word)
 
 		return tuple(cmd)
 
-	_cmd = parse_exec # To hook into Application.spawn and Application.run
+	def run(self, notebook, page, pageview=None):
+		args = (notebook, page, pageview)
+		cwd = page.source_file.parent()
 
-	def run(self, args, cwd=None):
-		self._tmpfile = None
-		Application.run(self, args, cwd=cwd)
-		if self._tmpfile:
-			notebook, page, pageview = args
-			page.parse('wiki', self._tmpfile.readlines())
-			notebook.store_page(page)
+		if pageview:
+			pageview.save_changes()
+
+		if self.replaceselection:
+			if not pageview:
+				raise ValueError('This tool needs a PageView object')
+			output = self.pipe(args, cwd=cwd)
+			logger.debug('Replace selection with: %s', output)
+			pageview.replace_selection(output, autoselect='word')
+		elif self.isreadonly:
+			self.spawn(args, cwd=cwd)
+		else:
 			self._tmpfile = None
+			Application.run(self, args, cwd=cwd)
+			if self._tmpfile:
+				page.parse('wiki', self._tmpfile.readlines())
+				notebook.store_page(page)
+				self._tmpfile = None
+
+			page.check_source_changed()
+			notebook.index.start_background_check(notebook)
+			# TODO instead of using run, use spawn and show dialog
+			# with cancel button. Dialog blocks ui.
 
 	def update(self, E=(), **F):
 		self['Desktop Entry'].update(E, **F)
@@ -461,7 +495,6 @@ class CustomToolManagerUI(object):
 	def get_ui_xml(self):
 		tools = self._manager
 		menulines = ["<menuitem action='%s'/>\n" % t.key for t in tools]
-		toollines = ["<toolitem action='%s'/>\n" % t.key for t in tools if t.showintoolbar]
 		textlines = ["<menuitem action='%s'/>\n" % t.key for t in tools if t.showincontextmenu == 'Text']
 		pagelines = ["<menuitem action='%s'/>\n" % t.key for t in tools if t.showincontextmenu == 'Page']
 		return """\
@@ -473,11 +506,6 @@ class CustomToolManagerUI(object):
 					</placeholder>
 				</menu>
 			</menubar>
-			<toolbar name='toolbar'>
-				<placeholder name='tools'>
-				%s
-				</placeholder>
-			</toolbar>
 			<popup name='text_popup'>
 				<placeholder name='tools'>
 				%s
@@ -491,40 +519,12 @@ class CustomToolManagerUI(object):
 		</ui>
 		""" % (
 			''.join(menulines),
-			''.join(toollines),
 			''.join(textlines),
 			''.join(pagelines)
 		)
 
 	def _action_handler(self, action):
-		tool = self._manager.get_tool(action.get_name())
-		logger.info('Execute custom tool %s', tool.name)
-		try:
-			self._exec_custom_tool(tool)
-		except:
-			zim.errors.exception_handler(
-				'Exception during action: %s' % tool.name)
-
-	def _exec_custom_tool(self, tool):
-		# FIXME: should this not be part of tool.run() ?
-		pageview = self.pageview
-		notebook, page = pageview.notebook, pageview.page
-		args = (notebook, page, pageview)
-		cwd = page.source_file.parent()
-
-		pageview.save_changes()
-		if tool.replaceselection:
-			output = tool.pipe(args, cwd=cwd)
-			logger.debug('Replace selection with: %s', output)
-			pageview.replace_selection(output, autoselect='word')
-		elif tool.isreadonly:
-			tool.spawn(args, cwd=cwd)
-		else:
-			tool.run(args, cwd=cwd)
-			pageview.page.check_source_changed()
-			notebook.index.start_background_check(notebook)
-			# TODO instead of using run, use spawn and show dialog
-			# with cancel button. Dialog blocks ui.
+		self._manager.run_custom_tool(self.pageview, action.get_name())
 
 
 class CustomToolManagerDialog(Dialog):
@@ -543,7 +543,7 @@ class CustomToolManagerDialog(Dialog):
 		self.vbox.pack_start(hbox, True, True, 0)
 
 		self.listview = CustomToolList(self.manager)
-		hbox.pack_start(self.listview, True, True, 0)
+		hbox.pack_start(ScrolledWindow(self.listview), True, True, 0)
 
 		vbox = Gtk.VBox(spacing=5)
 		hbox.pack_start(vbox, False, True, 0)
@@ -684,7 +684,7 @@ class EditCustomToolDialog(Dialog):
 		self.iconbutton = IconChooserButton(stock=Gtk.STOCK_EXECUTE)
 		if tool and tool.icon and tool.icon != Gtk.STOCK_EXECUTE:
 			try:
-				self.iconbutton.set_file(File(tool.icon))
+				self.iconbutton.set_file(LocalFile(tool.icon))
 			except Exception as error:
 				logger.exception('Could not load: %s', tool.icon)
 		label = Gtk.Label(label=_('Icon') + ':') # T: Input in "Edit Custom Tool" dialog

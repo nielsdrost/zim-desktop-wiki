@@ -82,13 +82,14 @@ from zim import __version__ as ZIM_VERSION
 
 import zim.datetimetz as datetime
 
-from zim.utils import OrderedDict
-from zim.fs import format_file_size
+from zim.base import LastDefinedOrderedDict
+from zim.newfs import format_file_size
 
 from zim.notebook import Path, LINK_DIR_BACKWARD, LINK_DIR_FORWARD
 
-from zim.formats import ParseTree, ParseTreeBuilder, Visitor, \
-	FORMATTEDTEXT, BULLETLIST, LISTITEM, STRONG, LINK, HEADING
+from zim.formats import ParseTree, ParseTreeBuilder, \
+	FORMATTEDTEXT, PARAGRAPH, BULLETLIST, LISTITEM, STRONG, LINK, HEADING, END, \
+	split_heading_from_parsetree
 
 from zim.templates import TemplateContextDict
 from zim.templates.functions import ExpressionFunction
@@ -187,7 +188,7 @@ class ExportTemplateContext(dict):
 				'prev': _link(prevpage),
 				'next': _link(nextpage),
 			},
-			'links': OrderedDict(), # keep order of links for iteration
+			'links': LastDefinedOrderedDict(), # keep order of links for iteration
 			'pages': pages,
 
 			# Template settings
@@ -272,6 +273,7 @@ class ExportTemplateContext(dict):
 
 		builder = ParseTreeBuilder()
 		builder.start(FORMATTEDTEXT)
+		builder.start(PARAGRAPH)
 		if self._index_page:
 			expanded = [self._index_page] + list(self._index_page.parents())
 		else:
@@ -312,10 +314,12 @@ class ExportTemplateContext(dict):
 				builder.append(LINK,
 					{'type': 'page', 'href': ':' + path.name},
 					path.basename)
+			builder.text('\n')
 			builder.end(LISTITEM)
 
 		for p in stack:
 			builder.end(BULLETLIST)
+		builder.end(PARAGRAPH)
 		builder.end(FORMATTEDTEXT)
 
 		tree = builder.get_parsetree()
@@ -366,43 +370,22 @@ class ExportTemplatePageIter(object):
 			yield p
 
 
-class HeadingSplitter(Visitor):
+def splitParseTreeByHeadings(parsetree, max_level=None):
+	max_level = max_level or 999
+	buffer = []
+	sections = [buffer]
 
-	def __init__(self, max_level=None):
-		self.max_level = max_level or 999
-		self._builder = ParseTreeBuilder()
-		self.headings = []
+	for t in parsetree.iter_tokens():
+		if t[0] == FORMATTEDTEXT or t == (END, FORMATTEDTEXT):
+			pass
+		elif t[0] == HEADING and int(t[1]['level']) <= max_level and buffer:
+			# Start new buffer
+			buffer = [t]
+			sections.append(buffer)
+		else:
+			buffer.append(t)
 
-	def _split(self):
-		self._builder.end(FORMATTEDTEXT)
-		tree = self._builder.get_parsetree()
-		if tree.hascontent:
-			self.headings.append(tree)
-		self._builder = ParseTreeBuilder()
-		self._builder.start(FORMATTEDTEXT)
-
-	def _close(self):
-		tree = self._builder.get_parsetree()
-		if tree.hascontent:
-			self.headings.append(tree)
-
-	def start(self, tag, attrib=None):
-		if tag is HEADING and int(attrib['level']) <= self.max_level:
-			self._split()
-		self._builder.start(tag, attrib)
-
-	def end(self, tag):
-		self._builder.end(tag)
-		if tag == FORMATTEDTEXT:
-			self._close()
-
-	def text(self, text):
-		self._builder.text(text)
-
-	def append(self, tag, attrib=None, text=None):
-		if tag is HEADING and int(attrib['level']) <= self.max_level:
-			self._split()
-		self._builder.append(tag, attrib, text)
+	return [ParseTree.new_from_tokens(buffer) for buffer in sections if buffer]
 
 
 class PageListProxy(object):
@@ -432,7 +415,11 @@ class ParseTreeProxy(object):
 	@property
 	def heading(self):
 		head, body = self._split_head()
-		return head
+		if head:
+			lines = self._dumper.dump(head)
+			return ''.join(lines)
+		else:
+			return ''
 
 	@property
 	def body(self):
@@ -461,13 +448,11 @@ class ParseTreeProxy(object):
 
 	def _split_head(self):
 		if not hasattr(self, '_severed_head'):
+			self._severed_head = (None, None)
 			if self._tree:
-				tree = self._tree.copy()
-				head = tree.get_heading_text()
-				tree.remove_heading()
-				self._severed_head = (head, tree)
-			else:
-				self._severed_head = (None, None)
+				head, tree = split_heading_from_parsetree(self._tree, keep_head_token=False)
+				if head:
+					self._severed_head = (head, tree)
 
 		return self._severed_head
 
@@ -489,14 +474,16 @@ class PageProxy(ParseTreeProxy):
 
 	@property
 	def title(self):
-		return self.heading or self.basename
+		if self._tree:
+			return self._tree.get_heading_text() or self.basename
+		else:
+			return self.basename
 
 	@ExpressionFunction
 	def headings(self, max_level=None):
 		if self._tree and self._tree.hascontent:
-			splitter = HeadingSplitter(max_level)
-			self._tree.visit(splitter)
-			for subtree in splitter.headings:
+			sections = splitParseTreeByHeadings(self._tree, max_level)
+			for subtree in sections:
 				yield HeadingProxy(self._page, subtree, self._dumper)
 
 	@property
@@ -531,6 +518,7 @@ class PageProxy(ParseTreeProxy):
 				pass
 		except IndexNotFoundError:
 			pass # XXX needed for index_page and other specials because they do not exist in the index
+
 
 class HeadingProxy(ParseTreeProxy):
 

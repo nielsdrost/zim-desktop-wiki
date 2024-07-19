@@ -1,9 +1,5 @@
 
-# Copyright 2012-2020 Jaap Karssenberg <jaap.karssenberg@gmail.com>
-
-'''Test cases for the base zim module.'''
-
-
+# Copyright 2012-2022 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 
 import tests
@@ -16,13 +12,13 @@ import threading
 import time
 
 
-from zim.fs import Dir, File, FS
-
 from zim.main import *
 
 import zim
 import zim.main
-import zim.main.ipc
+
+
+from zim.notebook.info import NotebookInfo
 
 
 class capture_stdout:
@@ -79,26 +75,90 @@ class TestHelp(tests.TestCase):
 
 class TestNotebookCommand(tests.TestCase):
 
+	cmd_class = NotebookCommand
 
-	def runTest(self):
-		cmd = NotebookCommand('gui')
+	def get_cmd(self, *args):
+		cmd = self.cmd_class('gui')
 		cmd.arguments = ('NOTEBOOK', '[PAGE]')
-		cmd.parse_options('./Notes')
+		cmd.parse_options(*args)
+		return cmd
 
+	def testPWDhandling(self):
 		# check if PWD at "parse_options" is remembered after changing dir
-		from zim.notebook.info import NotebookInfo
+		cmd = self.get_cmd('./Notes')
+
 		pwd = os.getcwd()
 		self.addCleanup(os.chdir, pwd)
+		os.chdir('/')
 
 		myinfo = NotebookInfo(pwd + '/Notes')
-		os.chdir('/')
 		notebookinfo, page = cmd.get_notebook_argument()
-
 		self.assertEqual(notebookinfo, myinfo)
-		os.chdir(pwd)
+
+	#def testNotebookName(self):
+	#	pass
+
+	def testFile(self):
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		file = folder.file('Foo.txt')
+		file.touch()
+
+		for arg in (file.path, file.uri):
+			cmd = self.get_cmd(arg)
+			myinfo = NotebookInfo(file.path)
+			notebookinfo, page = cmd.get_notebook_argument()
+			self.assertEqual(notebookinfo, myinfo)
+			notebook, href = cmd.build_notebook()
+			self.assertEqual(notebook.uri, folder.uri)
+			self.assertEqual(href.names, 'Foo')
+
+		# Test override by page argument
+		cmd = self.get_cmd(file.path, 'Bar')
+		notebook, href = cmd.build_notebook()
+		self.assertEqual(notebook.uri, folder.uri)
+		self.assertEqual(href.names, 'Bar')
+
+	def testNotebookZimFile(self):
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		config = folder.file('notebook.zim')
+		config.touch()
+
+		for arg in (config.path, config.uri):
+			cmd = self.get_cmd(arg)
+			myinfo = NotebookInfo(config.path)
+			notebookinfo, page = cmd.get_notebook_argument()
+			self.assertEqual(notebookinfo, myinfo)
+			notebook, href = cmd.build_notebook()
+			self.assertEqual(notebook.uri, folder.uri)
+			self.assertIsNone(href)
+
+	def testNestedNotebookZimFile(self):
+		# Test specific case where parent folder also is a notebook - as in bug #2189
+		parentfolder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		parentfolder.file('notebook.zim').touch()
+		folder = parentfolder.folder('MyNotebook')
+		config = folder.file('notebook.zim')
+		config.touch()
+
+		for arg in (config.path, config.uri):
+			cmd = self.get_cmd(arg)
+			myinfo = NotebookInfo(config.path)
+			notebookinfo, page = cmd.get_notebook_argument()
+			self.assertEqual(notebookinfo, myinfo)
+			notebook, href = cmd.build_notebook()
+			self.assertEqual(notebook.uri, folder.uri)
+			self.assertIsNone(href)
 
 
-class TestGui(tests.TestCase):
+
+class TestGuiCommand(TestNotebookCommand):
+
+	cmd_class = GuiCommand
+
+
+class TestGuiStart(tests.TestCase):
+
+	## TODO: test default notebook logic when no argument
 
 	def setUp(self):
 		file = ConfigManager.get_config_file('notebooks.list')
@@ -118,16 +178,18 @@ class TestGui(tests.TestCase):
 			cmd.run() # Exits without running due to no notebook given in dialog
 
 		### Try again with argument
-		dir = self.create_tmp_dir()
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		folder.touch()
+
 		cmd = GuiCommand('gui')
-		cmd.parse_options(dir)
+		cmd.parse_options(folder.path)
 		with tests.WindowContext(MainWindow):
 			with tests.LoggingFilter('zim', 'Exception while loading plugin:'):
 				window = cmd.run()
 				self.addCleanup(window.destroy)
 
 		self.assertEqual(window.__class__.__name__, 'MainWindow')
-		self.assertEqual(window.notebook.uri, Dir(dir).uri) # XXX
+		self.assertEqual(window.notebook.uri, folder.uri)
 		self.assertGreaterEqual(len(ConfigManager.preferences['General']['plugins']), 3)
 		self.assertGreaterEqual(len(window.pageview.__zim_extension_objects__), 3)
 
@@ -136,9 +198,40 @@ class TestGui(tests.TestCase):
 		self.assertIs(window2, window)
 			# Ensure repeated calling gives unique window
 
-	# TODO
-	# Check default notebook
-	# Check dialog list prompt
+
+class TestGuiListCommand(tests.TestCase):
+
+	# NotebookDialog has it's own't test cases, which also cover the
+	# AddNotebookDialog and prompt_notebook, so here we can mock it and
+	# just test it is called properly from the command class
+
+	def setUp(self):
+		from zim.notebook import NotebookInfo
+
+		self.folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		self.folder.touch()
+
+		import zim.gui.notebookdialog
+		orig = zim.gui.notebookdialog.prompt_notebook
+		def restore():
+			zim.gui.notebookdialog.prompt_notebook = orig
+		self.addCleanup(restore)
+
+		def mock():
+			return NotebookInfo(self.folder.uri, name='Test')
+
+		zim.gui.notebookdialog.prompt_notebook = mock
+
+	def runTest(self):
+		from zim.gui.mainwindow import MainWindow
+
+		cmd = GuiCommand('gui')
+		cmd.parse_options('--list')
+
+		with tests.WindowContext(MainWindow):
+			with tests.LoggingFilter('zim', 'Exception while loading plugin:'):
+				window = cmd.run()
+				self.addCleanup(window.destroy)
 
 
 class TestManual(tests.TestCase):
@@ -162,9 +255,10 @@ class TestServer(tests.TestCase):
 		from urllib.request import urlopen
 		from urllib.error import URLError
 
-		dir = self.create_tmp_dir()
+		dir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		dir.touch()
 		cmd = ServerCommand('server')
-		cmd.parse_options(dir)
+		cmd.parse_options(dir.path)
 		t = threading.Thread(target=cmd.run)
 		t.start()
 
@@ -191,133 +285,7 @@ class TestServerGui(tests.TestCase):
 		self.assertEqual(window.__class__.__name__, 'ServerWindow')
 
 
-
-
 ## ExportCommand() is tested in tests/export.py
-
-
-class TestIPC(tests.TestCase):
-
-	def runTest(self):
-		if os.name == 'posix':
-			# There is an upper limit to lenght of a socket name for AF_UNIX
-			# (107 characters ?). On OS X the path to TMPDIR already consumes
-			# 50 chars, and we use "zim-$USER" -- so can still give errors for
-			# user names > 20 chars. But basename should be limitted.
-			from zim.main.ipc import SERVER_ADDRESS
-			self.assertLessEqual(
-				len(os.path.basename(SERVER_ADDRESS)), 25,
-				"name too long: %s" % os.path.basename(SERVER_ADDRESS)
-			)
-
-		inbox = [None]
-		def handler(*args):
-			inbox[0] = args
-
-		zim.main.ipc.start_listening(handler)
-		self.addCleanup(zim.main.ipc._close_listener)
-
-		self.assertRaises(AssertionError, zim.main.ipc.dispatch, 'test', '123')
-			# raises due to sanity check same process
-
-		zim.main.ipc.set_in_main_process(False) # overrule sanity check
-		t = threading.Thread(target=zim.main.ipc.dispatch, args=('test', '123'))
-		t.start()
-		while t.is_alive():
-			tests.gtk_process_events()
-		tests.gtk_process_events()
-		self.assertEqual(inbox[0], ('test', '123'))
-
-
-### TODO test various ways of calling ZimApplication ####
-
-# Start main
-# Handle incoming
-# Toplevel life cycle
-# Spawn new
-# Spawn standalone
-
-class TestZimApplication(tests.TestCase):
-
-	def testSimple(self):
-		app = ZimApplication()
-
-		class MockCmd(object):
-
-			def __init__(self):
-				self.opts = {}
-				self.commandline = ['mockcommand']
-				self.hasrun = False
-
-			def run(self):
-				self.hasrun = True
-
-		cmd = MockCmd()
-		self.assertFalse(cmd.hasrun)
-		app._run_cmd(cmd, ())
-		self.assertTrue(cmd.hasrun)
-
-
-	def testGtk(self):
-		app = ZimApplication()
-
-		class MockCmd(GtkCommand):
-
-			def __init__(self):
-				self.opts = {'standalone': True}
-				self.hasrun = False
-
-			def _quit(self, *a):
-				from gi.repository import GObject
-				from gi.repository import Gtk
-				Gtk.main_quit()
-				return False # stop timer
-
-			def run(self):
-				from gi.repository import GObject
-				from gi.repository import Gtk
-				self.hasrun = True
-				GObject.timeout_add(500, self._quit)
-				return Gtk.Window()
-
-		cmd = MockCmd()
-		self.assertFalse(cmd.hasrun)
-		app._run_cmd(cmd, ())
-		self.assertTrue(cmd.hasrun)
-
-	def testPluginAPI(self):
-		from zim.signals import SignalEmitter
-		class MockWindow(SignalEmitter):
-
-			__signals__ = {
-				'destroy': (None, None, ())
-			}
-
-			def __init__(self, notebook):
-				self.notebook = notebook
-
-			def destroy(self):
-				pass
-
-		class MockNotebook(object):
-
-			def __init__(self, uri):
-				self.uri = uri
-
-		n1 = MockNotebook('foo')
-		n2 = MockNotebook('bar')
-		w1 = MockWindow(n1)
-		w2 = MockWindow(n2)
-
-		app = ZimApplication()
-		app.add_window(w1)
-		app.add_window(w2)
-
-		self.assertEqual(set(app.toplevels), {w1, w2})
-		self.assertEqual(app.notebooks, {n1, n2})
-		self.assertEqual(app.get_mainwindow(n1, _class=MockWindow), w1)
-		self.assertEqual(app.get_mainwindow(MockNotebook('foo'), _class=MockWindow), w1)
-
 
 import os
 

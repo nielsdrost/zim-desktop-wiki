@@ -75,14 +75,23 @@ For example, to add functionality to the `PageView` class, you must define a
 class derived from `PageViewExtension`.
 
 At the time of writing these extension base-classes are defined:
-  - `NotebookExtension`: for functions that act on signals of the notebook
+
+  - `NotebookExtension`: for functions that act on signals of the notebook. Use
+    this for extensions that work directly with the notebook data, or the index
+    database. Typically a separate extension would be defined within the same
+    plugin to add a UI that shows that data
   - `PageViewExtension`: for functions that add functionality to the editor
-    window, or want to add side panes next to the editor
+    window, or want to add side panes next to the editor. Use this for e.g. for
+    a side pane showing additional information or content for a specific page
+  - `NotebookExtension`: similar to a `PageViewExtension`, but these extensions
+    only load for the main window where the notebook can be navigated, not for
+    windows with a single page that cannot be changed. Use this for e.g.
+    for a side pane showing an index of a the notebook
   - `InsertedObjectTypeExtension`: special extension for plugins that want to
     define an object type (e.g. equation) that can be rendered inline in the
     text -- see also to `zim.plugins.base.imagegenerator` module
   - `MainWindowExtension`: for any other changes to the mainwindow that are not
-    handled by a `PageViewExtension`
+    handled by a `PageViewExtension` or a `NotebookExtension`
 
 When you define a subclass of such an extension class, it will be loaded
 automatically by the plugin for each instance of the target component.
@@ -93,6 +102,11 @@ to signals and calling methods on the extended object.
 Apart from extensions, there is one other class that will also be used
 automatically: Classes derived from the `Command` class are used to handle
 commandline arguments in the form "`zim --plugin yourplugin`".
+
+The class diagram below may help finding your way around the code and to
+identify where you want to extend the application.
+
+![](./class_diagram.png)
 
 
 ## Preferences and properties
@@ -134,7 +148,7 @@ In short, this means that any class can define a number of signals that are
 emitted for various events. Objects that are interested in these events can
 register an event handler using the `connect()` method.
 
-Zim defines a `SignalConnectorMixin` class in `zim.signals` with some
+Zim defines a `ConnectorMixin` class in `zim.signals` with some
 convenience methods for classes that want to connect to signals.
 
 For classes that do not derive from GObject classes but do want to emit their
@@ -150,7 +164,7 @@ and is only broken when that object is being destroyed. So if you do
 then object_B will not be destroyed as long as object_A is alive. On the other
 hand, if object_A is destroyed, object_B simply doesn't get any signals anymore.
 
-The `SignalConnectorMixin` class keeps track of the connections it made, which
+The `ConnectorMixin` class keeps track of the connections it made, which
 helps in cleaning up.
 
 
@@ -207,3 +221,39 @@ The PageView object defines a signal `activate-link`. An extension object
 can connect to this signal and check the link that is being opened. If it
 matches the URL scheme of interest you can handle it and return `True` to let
 the PageView know it should not try to open this link itself.
+
+### Define a new inline object type
+With an "inline object" we mean objects that are part of the wiki text, like
+equations, diagrams, tables.
+
+These can be defined via the `InsertedObjectTypeExtension`. The object model
+requires a "model-view" architecture: the wiki text is parsed and stored in
+an "model" object. This model is than presented in a "view" (the actual
+Gtk widget). Keep in mind that a page can be shown in multiple windows at the
+same time, so there may be multiple views connected to a single model.
+
+See also to `zim.plugins.base.imagegenerator` module for a special class of
+objects which generate an image based on text input - like the equation and
+diagram editor plugins.
+
+### Add a widget in the side pane of the window
+To add widgets to the side pane of the window, you should either extend the
+`PageView` using a `PageViewExtension` or extend the `NotebookView` using a
+`NotebookViewExtension`. Both have a method `add_sidepane_widget()` which
+takes care of the placement in the window. The widget itself should be
+derived of a Gtk widget and also inherit from the `WindowSidePaneWidget`
+class.
+
+The window layout works best if widgets are placed in the left and right
+side panes. Use of the top and bottom panes is supported, but discouraged.
+
+Widgets are hidden when the pane is collapsed. Therefore the `visible`
+property of the Gtk widget can be used to determine whether a widget is
+currently being shown or not.
+
+### Maintain state of a plugin
+ Besides the preferences and properties, there is an `uistate` dict which
+ can be used to store the state of a plugin - e.g. window size, visible
+ selections etc. This dict is intended to store the state which one would
+ wnat to restore after closign the application and restarting. It will never
+ capture the exact state of the live Gtk widgets.

@@ -36,18 +36,27 @@ def clone_mock_object(source, target):
 	newnode.mtime = mynode.mtime
 
 
-def os_native_path(unixpath):
+def os_native_path(unixpath, drive='M:'):
 	'''Adapts unix style paths for windows if needed
+	For file paths starting with "/" and "file:///" URIs a drive letter is added
+	and path seperators are converted if needed.
 	Used for convenience to of writing cross-platform test cases
 	Called automatically when constructing a L{MockFile} or L{MockFolder} object
-	Does not modify URLs
 	@param unixpath: the (mock) unix path as a string
 	'''
+	# Default drive letter is choosen arbitrary, should be OK for mock
 	assert isinstance(unixpath, str)
-	if os.name == 'nt' and not is_url_re.match(unixpath):
-		if unixpath.startswith('/'):
-			unixpath = 'M:' + unixpath # arbitrary drive letter, should be OK for mock
-		return unixpath.replace('/', '\\')
+	if os.name == 'nt':
+		if unixpath.startswith('file:///'):
+			return unixpath.replace('file:///', 'file:///' + drive + '/')
+		if unixpath.startswith('file://localhost/'):
+			return unixpath.replace('file://localhost/', 'file://localhost/' + drive + '/')
+		if unixpath.startswith('file:/'):
+			return unixpath.replace('file:/', 'file:/' + drive + '/')
+		else:
+			if unixpath.startswith('/'):
+				unixpath = drive + unixpath
+			return unixpath.replace('/', '\\')
 	else:
 		return unixpath
 
@@ -195,10 +204,7 @@ class MockFSObjectBase(FSObjectBase):
 
 	def parent(self):
 		dirname = self.dirname
-		if dirname is None:
-			raise ValueError('Can not get parent of root')
-		else:
-			return MockFolder(dirname, watcher=self.watcher, _fs=self._fs)
+		return MockFolder(dirname, watcher=self.watcher, _fs=self._fs) if dirname else None
 
 	def exists(self):
 		try:
@@ -228,11 +234,14 @@ class MockFSObjectBase(FSObjectBase):
 		return self._node().mtime
 
 	def moveto(self, other):
+		if not self.exists():
+			raise FileNotFoundError(self)
+
 		if isinstance(self, File) and isinstance(other, Folder):
 			other = other.file(self.basename)
 
 		if not isinstance(other, MockFSObjectBase):
-			raise NotImplementedError('TODO: support cross object type move')
+			return self._moveto(other)
 
 		if other.isequal(self):
 			if other.path == self.path:
@@ -255,6 +264,9 @@ class MockFSObjectBase(FSObjectBase):
 		return other
 
 	def copyto(self, other):
+		if not self.exists():
+			raise FileNotFoundError(self)
+
 		if isinstance(self, File) and isinstance(other, Folder):
 			other = other.file(self.basename)
 
@@ -322,10 +334,8 @@ class MockFolder(MockFSObjectBase, Folder):
 
 	def touch(self):
 		if not self.exists():
-			try:
-				self.parent().touch()
-			except ValueError:
-				pass
+			for parent in self.parents():
+				parent.touch()
 
 			node = self._fs.touch(self.pathnames, {})
 			if not node.isdir:
@@ -392,8 +402,14 @@ class MockFile(MockFSObjectBase, File):
 	def read_binary(self):
 		return self._node().data
 
-	def read(self):
-		return self._node().data.decode('UTF-8').replace('\r\n', '\n')
+	def read(self, size=-1):
+		text = self._node().data.decode('UTF-8').replace('\r\n', '\n')
+		if size and size > 0:
+			text = text[:size]
+		return text
+
+	def readline(self, size=-1):
+		return self.read(size).splitlines(True)[0]
 
 	def readlines(self):
 		return self.read().splitlines(True)

@@ -1,6 +1,6 @@
 
 # Copyright 2010 Fabian Stanke
-# Copyright 2011-2017 Jaap Karssenberg
+# Copyright 2011-2021 Jaap Karssenberg
 
 
 from gi.repository import GObject
@@ -20,14 +20,12 @@ from zim.notebook.index import IndexNotFoundError
 from zim.notebook.index.pages import PageIndexRecord
 from zim.notebook.index.tags import IS_PAGE, IS_TAG, \
 	TagsView, TaggedPagesTreeModelMixin, TagsTreeModelMixin, IndexTag
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 
-from zim.gui.pageview import PageViewExtension
+from zim.gui.notebookview import NotebookViewExtension
 from zim.gui.widgets import LEFT_PANE, PANE_POSITIONS, populate_popup_add_separator, ScrolledWindow, encode_markup_text, \
 	WindowSidePaneWidget
-from zim.gui.clipboard import pack_urilist, INTERNAL_PAGELIST_TARGET_NAME
 
-import zim.gui.clipboard
 
 logger = logging.getLogger('zim.plugins.tags')
 
@@ -48,13 +46,21 @@ This plugin provides a page index filtered by means of selecting tags in a cloud
 		# key, type, label, default
 		('pane', 'choice', _('Position in the window'), LEFT_PANE, PANE_POSITIONS),
 			# T: option for plugin preferences
+		('autoexpand', 'bool', _('Automatically expand sections on open page'), True),
+			# T: preferences option
+		('autocollapse', 'bool', _('Automatically collapse sections on close page'), True),
+			# T: preferences option
+		('use_hscroll', 'bool', _('Use horizontal scrollbar (may need restart)'), False),
+			# T: preferences option
+		('use_tooltip', 'bool', _('Use tooltips'), True),
+			# T: preferences option
 	)
 
 
-class TagsPageViewExtension(PageViewExtension):
+class TagsNotebookViewExtension(NotebookViewExtension):
 
 	def __init__(self, plugin, pageview):
-		PageViewExtension.__init__(self, plugin, pageview)
+		NotebookViewExtension.__init__(self, plugin, pageview)
 
 		self.widget = TagsPluginWidget(
 			pageview.notebook,
@@ -76,11 +82,20 @@ class TagsPageViewExtension(PageViewExtension):
 		#))
 		self.connectto(pageview, 'page-changed', lambda o, p: self.widget.set_page(p))
 
+		self.on_preferences_changed(self.plugin.preferences)
+		self.plugin.preferences.connect('changed', self.on_preferences_changed)
+
+	def on_preferences_changed(self, preferences):
+		self.widget.treeview.set_use_tooltip(preferences['use_tooltip'])
+		self.widget.treeview.set_use_ellipsize(not preferences['use_hscroll'])
+			# To use horizontal scrolling, turn off ellipsize
+		self.widget.treeview.set_autoexpand(preferences['autoexpand'], preferences['autocollapse'])
+
 
 class TagsPluginWidget(Gtk.VPaned, WindowSidePaneWidget):
 	'''Widget combining a tag cloud and a tag based page treeview'''
 
-	title = _('Tags') # T: title for sidepane tab
+	title = _('T_ags') # T: title for sidepane tab
 
 	def __init__(self, notebook, navigation, uistate):
 		GObject.GObject.__init__(self)
@@ -280,19 +295,6 @@ class TaggedPageTreeStore(TaggedPagesTreeModelMixin, DuplicatePageTreeStore):
 
 
 class TagsPageTreeView(PageTreeView):
-
-	def do_drag_data_get(self, dragcontext, selectiondata, info, time):
-		assert selectiondata.get_target().name() == INTERNAL_PAGELIST_TARGET_NAME
-		model, iter = self.get_selection().get_selected()
-		path = model.get_indexpath(iter)
-		if isinstance(path, IndexTag):
-			link = '@' + path.name
-		else:
-			link = path.name
-		logger.debug('Drag data requested, we have internal tag/path "%s"', link)
-		data = pack_urilist((link,))
-		selectiondata.set(selectiondata.get_target(), 8, data)
-		zim.gui.clipboard._internal_selection_data = data # HACK issue #390
 
 	def set_current_page(self, path, vivificate=False):
 		'''Set the current page in the treeview

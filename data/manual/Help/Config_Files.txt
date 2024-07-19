@@ -35,12 +35,25 @@ Where ''%appdata%'' is the default Windows path to store application data, typic
 
 When there is no ''%HOME%'' environment parameter defined on Windows either the ''%USERPROFILE%'' parameter or ''%HOMEDRIVE%'' + ''%HOMEPATH%'' are used. Make sure to define ''%HOME%'' or ''%USERPROFILE%'' including a drive letter.
 
+===== Portable install =====
+For the portable install the config files are looked up relative to the installation folder. The defaults are:
+
+'''
+$XDG_CONFIG_HOME = ../config/
+$XDG_DATA_HOME   = ../data/
+'''
+
+The ''../'' means that the configuration folders are in the same parent folder as the installation folder. This is intentionally, so installing a new version does not overwrite the configuration.
+
+If you want to change the paths for the portable install, there is a special configuration file used at startup of the application that is called ''environ.ini'' which allows customizing the lookup.
+
+
 ==== macOS ====
 On macOS the default paths are:
 
 '''
- $XDG_CONFIG_HOME = ~/Application Support/org.zim-wiki.Zim/
- $XDG_DATA_HOME = ~/Application Support/org.zim-wiki.Zim/share/
+ $XDG_CONFIG_HOME = ~/Library/Application Support/org.zim-wiki.Zim/
+ $XDG_DATA_HOME = ~/Library/Application Support/org.zim-wiki.Zim/share/
 '''
 
 ===== Global Config Files =====
@@ -52,7 +65,11 @@ The default config file is ''$XDG_CONFIG_HOME/zim/preferences.conf''.
 
 The config file is written automatically when you close zim. So if you want to change it manually you need to close all instances of zim first.
 
-There is a hidden option here called "''autosave_timeout''" which gives the interval for autosaving in seconds, the default is 10.
+There are hidden options which you can added directly in the file but are not shown in the preferences dialog:
+* "''autosave_timeout''" which gives the interval for autosaving in seconds, the default is 10
+* "''gtk_bell''" which can be ''True'' or ''False'', if ''False'' it overrides Gtk settings to turn off the bell in the editor, default is ''False''
+
+
 
 ==== Interwiki URL list ====
 The file ''$XDG_DATA/zim/urls.list'' gives a list of urls which are used for the [[Links|interwiki]] function. All files in the ''$XDG_DATA'' path are read when looking for a URL, so you can use $XDG_DATA_HOME to override the installation defaults.
@@ -105,8 +122,9 @@ style = italic
 Known properties for TextView:
 * **indent**: //integer//	- indenting step size in pixels
 * **tabs**: //integer//	- tab size in pixels
-* **linespacing**: //integer//	- line spacing in pixels
-* **justify**: ''JUSTIFY_LEFT'', ''JUSTIFY_FILL'', ...
+* **linespacing**: //integer// - line spacing in pixels, effectively spacing between paragraphs
+* **wrapped-lines-linespacing**: //integer// - line spacing in pixels between wrapped lines
+* **justify**: ''LEFT'', ''RIGHT'', ''CENTER'' or ''FILL''
 * **font**: //string//
 * **bullet_icon_size**: ''ICON_SIZE_MENU'', ''ICON_SIZE_LARGE_TOOLBAR'', ...
 
@@ -121,6 +139,7 @@ Known style tags:
 * **sub**: subscript text
 * **sup**: superscript text
 * **link**: hyperlink text
+* **page-link**: hyperlink text pointing to another page
 * **indent**: indented lines
 * **bullet-list**: lines in a bullet list
 * **numbered-list**: lines in a numbered list
@@ -142,6 +161,10 @@ Known properties for Tags:
 * **indent**: //integer//
 * **linespacing**: //integer//
 * **rise**: //integer// (offset from line center, intended for "sup" and "sub")
+
+
+In the style config, properties can be postfixed with "''[darktheme]''" to define variants that are used when the "Prefer dark theme" [[Preferences|preference]] is enabled.
+
 
 ==== Gtk configuration ====
 
@@ -170,9 +193,9 @@ Specific ones are:
 
 * zim-sidepane: for any side pane of the application window
 * zim-pageview: for the textview showing the page
-* zim-inserted-object: for objects that are inserted in the text; default is to render a small border line
+* zim-inserted-object-inline: for objects that are inserted in the text in the middle of a line
+* zim-inserted-object: for objects that are inserted in the text as a block; default is to render a small border line
 * zim-inserted-object-head: for the top bar of such an object; default is to render a small border line at the bottom
-* zim-statusbar-button: for styling buttons that are placed in the statusbar
 
 More names are documented in the manual page of specific plugins.
 

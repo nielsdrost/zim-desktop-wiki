@@ -1,25 +1,23 @@
-
 # Copyright 2009-2017 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 
 import tests
-
+from tests import os_native_path
 
 import os
-import sys
 import sqlite3
-import time
+
+from zim.base.naturalsort import natural_sort_key
 
 from zim.notebook.layout import FilesLayout
-from zim.newfs import LocalFolder, File
-from zim.newfs.mock import os_native_path
-
 from zim.notebook import Path
+from zim.notebook.page import HRef
 from zim.notebook.index import Index, DB_VERSION
-from zim.notebook.index.files import FilesIndexer, TestFilesDBTable, FilesIndexChecker
-from zim.notebook.index.pages import PagesIndexer, TestPagesDBTable
+from zim.notebook.index.files import FilesIndexer, TestFilesDBTable, FilesIndexChecker, TYPE_FOLDER
+from zim.notebook.index.pages import PagesIndexer, TestPagesDBTable, PagesViewInternal
 from zim.notebook.index.links import LinksIndexer
 from zim.notebook.index.tags import TagsIndexer
+from zim.formats.wiki import Parser as WikiParser
 
 
 def is_dir(path):
@@ -116,11 +114,15 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 
 		'new/', # nested page
 		'new/page.txt',
+
+		'newfolder/', # nested page in subfolder
+		'newfolder/newsubfolder/',
+		'newfolder/newsubfolder/page.txt',
 	)))
 	FILES_CHANGE = (
 		'foo.txt',
 	)
-	PAGE_TEXT = 'test 123\n'
+	PAGE_TEXT = 'Content-Type: text/x-zim-wiki\n\ntest 123\n'
 
 	def runTest(self):
 		# Test in 3 parts:
@@ -129,10 +131,10 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 		#   3. Check and update after files disappear
 
 		self.root = self.setUpFolder(mock=tests.MOCK_DEFAULT_REAL)
-		db = sqlite3.connect(':memory:')
-		db.row_factory = sqlite3.Row
+		self.db = sqlite3.connect(':memory:')
+		self.db.row_factory = sqlite3.Row
 
-		indexer = FilesIndexer(db, self.root)
+		indexer = FilesIndexer(self.db, self.root)
 
 		def cb_filter_func(name, o, a):
 			#~ print('>>', name)
@@ -166,8 +168,8 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 		self.assertEqual(set(signals['file-row-changed']), files)
 		self.assertEqual(signals['file-row-deleted'], [])
 
-		self.assertFilesDBConsistent(db)
-		self.assertFilesDBEquals(db, self.FILES)
+		self.assertFilesDBConsistent(self.db)
+		self.assertFilesDBEquals(self.db, self.FILES)
 
 		# 2. Check and update after new files appear
 		signals.clear()
@@ -183,8 +185,8 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 		self.assertEqual(set(signals['file-row-changed']), update)
 		self.assertEqual(signals['file-row-deleted'], [])
 
-		self.assertFilesDBConsistent(db)
-		self.assertFilesDBEquals(db,
+		self.assertFilesDBConsistent(self.db)
+		self.assertFilesDBEquals(self.db,
 			self.FILES + self.FILES_UPDATE
 		)
 
@@ -199,8 +201,8 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 		self.assertEqual(signals['file-row-changed'], [])
 		self.assertEqual(set(signals['file-row-deleted']), files)
 
-		self.assertFilesDBConsistent(db)
-		self.assertFilesDBEquals(db, self.FILES)
+		self.assertFilesDBConsistent(self.db)
+		self.assertFilesDBEquals(self.db, self.FILES)
 
 	def create_files(self, files):
 		for name in files:
@@ -215,6 +217,30 @@ class TestFilesIndexer(tests.TestCase, TestFilesDBTable):
 				self.root.folder(name).remove()
 			else:
 				self.root.child(name).remove()
+
+
+class TestFilesIndexerRobustForFolderMtime(TestFilesIndexer):
+	# Like TestFilesIndexer but explicitly hack the folder mtime in the database
+	# to not detect the folder structure change by mtime. Ensure robustness when
+	# filesystem mtime is not reliable for folders.
+
+	def create_files(self, files):
+		TestFilesIndexer.create_files(self, files)
+		self.reset_folder_mtimes()
+
+	def remove_files(self, files):
+		TestFilesIndexer.remove_files(self, files)
+		self.reset_folder_mtimes()
+
+	def reset_folder_mtimes(self):
+		count = 0
+		for node_id, rel_path in self.db.execute('SELECT id, path FROM files WHERE node_type = ?', (TYPE_FOLDER,)):
+			folder = self.root.folder(rel_path)
+			if folder.exists():
+				mtime = folder.mtime()
+				self.db.execute('UPDATE files SET mtime = ? WHERE id = ?', (mtime, node_id))
+			count += 1
+		assert count > 0
 
 
 class TestFilesIndexerWithCaseInsensitiveFilesytem(tests.TestCase, TestFilesDBTable):
@@ -264,6 +290,8 @@ class TestPagesIndexer(TestPagesDBTable, tests.TestCase):
 		'foo-bar.txt', # page without children
 		'baz/dus/ja.txt', # page nested 2 folders deep
 		'argh/somefile.pdf', # not a page
+		'foo/not_a_page.txt', # not a page - see below for missing content line
+		'not_a_page.txt', # not a page - see below for missing content line
 	)))
 	PAGES = (
 		'foo',
@@ -313,7 +341,7 @@ class TestPagesIndexer(TestPagesDBTable, tests.TestCase):
 		db = sqlite3.connect(':memory:')
 		db.row_factory = sqlite3.Row
 
-		file_indexer = tests.MockObject()
+		file_indexer = tests.MockObject(methods=('connect',))
 
 		indexer = PagesIndexer(db, layout, file_indexer)
 
@@ -333,7 +361,10 @@ class TestPagesIndexer(TestPagesDBTable, tests.TestCase):
 		# 1. insert files
 		for i, path in enumerate(self.FILES):
 			file = self.root.file(path)
-			file.write('test 123')
+			if path.endswith('.txt') and not "not_a_page" in path:
+				file.write('Content-Type: text/x-zim-wiki\n\ntest 123\n')
+			else:
+				file.write('test 123\n')
 			row = {'id': i, 'path': path}
 			indexer.on_file_row_inserted(file_indexer, row)
 			self.assertPagesDBConsistent(db)
@@ -383,10 +414,10 @@ class TestPagesIndexer(TestPagesDBTable, tests.TestCase):
 		self.assertPagesDBEquals(db, [])
 		self.assertEqual(signals['page-row-inserted'], [])
 		self.assertEqual(set(signals['page-row-changed']), {'foo'})
-						 # "foo" has source that is deleted before children
+						# "foo" has source that is deleted before children
 		self.assertEqual(set(signals['page-row-deleted']), set(self.PAGES))
 		self.assertEqual(signals['page-changed'], ['foo'])
-						 # "foo" has source that is deleted before children
+						# "foo" has source that is deleted before children
 
 
 class TestPageNameConflict(tests.TestCase):
@@ -397,7 +428,7 @@ class TestPageNameConflict(tests.TestCase):
 		db = sqlite3.connect(':memory:')
 		db.row_factory = sqlite3.Row
 
-		file_indexer = tests.MockObject()
+		file_indexer = tests.MockObject(methods=('connect',))
 
 		indexer = PagesIndexer(db, layout, file_indexer)
 
@@ -407,12 +438,6 @@ class TestPageNameConflict(tests.TestCase):
 
 		self.assertEqual(id1, id2)
 
-
-from zim.utils import natural_sort_key
-from zim.notebook.index.pages import PagesViewInternal
-from zim.notebook.page import HRef
-from zim.formats.wiki import Parser as WikiParser
-from zim.newfs.mock import MockFile
 
 class TestLinksIndexer(tests.TestCase):
 
@@ -435,7 +460,7 @@ class TestLinksIndexer(tests.TestCase):
 
 		db = sqlite3.connect(':memory:')
 		db.row_factory = sqlite3.Row
-		pi = PagesIndexer(db, None, tests.MockObject())
+		pi = PagesIndexer(db, None, tests.MockObject(methods=('connect',)))
 		for i, name, cont in self.PAGES:
 			db.execute(
 				'INSERT INTO pages(id, name, lowerbasename, sortkey, parent, source_file) VALUES (?, ?, ?, ?, 1, 1)',
@@ -451,7 +476,7 @@ class TestLinksIndexer(tests.TestCase):
 		self.assertEqual((i, pn), (2, Path('Bar')))
 
 		## Test the actual indexer
-		pageindexer = tests.MaskedObject(pi, 'connect')
+		pageindexer = tests.MaskedObject(pi, ('connect',))
 		indexer = LinksIndexer(db, pageindexer)
 
 		for i, name, cont in self.PAGES:
@@ -485,6 +510,61 @@ class TestLinksIndexer(tests.TestCase):
 		self.assertEqual(rows, [])
 
 
+class TestUnicodeRepresentationAlternatives(tests.TestCase):
+
+	# Write "Glück" as either
+	#    "Gl\u00fcck" using 'LATIN SMALL LETTER U WITH DIAERESIS' (U+00FC)
+	# or "GLu\u0308ck" using 'COMBINING DIAERESIS' (U+0308)
+	#
+	# Both are valid unicode and should be recognized as the same page.
+	# Gtk input methods seem to prefer single character
+	# Specifically Mac OS X seems to prefer combination character for filesystem
+
+	def testNotebook(self):
+		self._test_notebook("Gl\u00fcck", "GLu\u0308ck")
+		self._test_notebook("GLu\u0308ck", "Gl\u00fcck")
+
+	def _test_notebook(self, file_rep, link_rep):
+		# Create a notebook with different unicode representations for
+		# the page and the link name and check they get linked correctly
+
+		notebook = self.setUpNotebook(content={
+			'page A': 'Link [[%s]]' % link_rep,
+			'page B': 'Link [[%s]]' % file_rep,
+			file_rep: 'Test 123'
+		})
+
+		# Now check both page a and page b link to "file_rep", not placeholder
+		links_a = list(notebook.links.list_links(Path('page A')))
+		links_b = list(notebook.links.list_links(Path('page B')))
+		self.assertEqual(len(links_a), 1)
+		self.assertEqual(links_a[0].target, Path(file_rep))
+		self.assertEqual(len(links_b), 1)
+		self.assertEqual(links_b[0].target, Path(file_rep))
+
+	def testPlaceHolderFirst(self):
+		self._test_placeholder_first("Gl\u00fcck", "GLu\u0308ck")
+		self._test_placeholder_first("GLu\u0308ck", "Gl\u00fcck")
+
+	def _test_placeholder_first(self, file_rep, link_rep):
+		# First create a placeholder, then test placeholder is updated correctly
+		# when page is created
+		notebook = self.setUpNotebook(content={
+			'page A': 'Link [[%s]]' % link_rep,
+		})
+		links_a = list(notebook.links.list_links(Path('page A')))
+		self.assertEqual(len(links_a), 1)
+		self.assertEqual(links_a[0].target, Path(link_rep))
+
+		page = notebook.get_page(Path(file_rep))
+		page.parse('wiki', 'test 123')
+		notebook.store_page(page)
+
+		links_a = list(notebook.links.list_links(Path('page A')))
+		self.assertEqual(len(links_a), 1)
+		self.assertEqual(links_a[0].target, Path(file_rep))
+
+
 class TestTagsIndexer(tests.TestCase):
 
 	PAGES = (
@@ -496,7 +576,7 @@ class TestTagsIndexer(tests.TestCase):
 		db = sqlite3.connect(':memory:')
 		db.row_factory = sqlite3.Row
 
-		indexer = TagsIndexer(db, tests.MockObject())
+		indexer = TagsIndexer(db, tests.MockObject(methods=('connect',)))
 		for i, name, text in self.PAGES:
 			tree = WikiParser().parse(text)
 			row = {'id': i, 'name': name}
@@ -542,7 +622,7 @@ class TestFullIndexer(TestFilesIndexer):
 	# Just test that all indexers play nice together,
 	# no detailed assertions
 
-	PAGE_TEXT = 'test 123\n[[foo:sub1]]\n[[sub1]]\n@tagfoo\n'
+	PAGE_TEXT = 'Content-Type: text/x-zim-wiki\n\ntest 123\n[[foo:sub1]]\n[[sub1]]\n@tagfoo\n'
 		# link content choosen to have one link
 		# that resolves always and one link that
 		# resolves for some pages, but causes

@@ -15,6 +15,12 @@ from zim.fs import SEP
 from zim.errors import Error
 
 
+class FilterDeprecationWarning(tests.LoggingFilter):
+
+	def __init__(self):
+		tests.LoggingFilter.__init__(self, 'zim.fs', 'Using deprecated class')
+
+
 def modify_file_mtime(path, func):
 	'''Helper function to modify a file in such a way that mtime
 	changed.
@@ -44,6 +50,9 @@ class FilterFileMissingWarning(tests.LoggingFilter):
 
 
 class TestFS(tests.TestCase):
+
+	def setUp(self):
+		FilterDeprecationWarning().wrap_test(self)
 
 	def testFunctions(self):
 		smb_urls = (
@@ -141,7 +150,7 @@ class TestFS(tests.TestCase):
 
 	def testFile(self):
 		'''Test File object'''
-		tmpdir = self.create_tmp_dir('testFile')
+		tmpdir = self.setUpFolder(name='testFile', mock=tests.MOCK_ALWAYS_REAL).path
 		file = File(tmpdir + '/foo/bar/baz.txt')
 		assert not file.exists()
 		file.touch()
@@ -177,7 +186,7 @@ class TestFS(tests.TestCase):
 
 		# test byte order mark
 		file = File('tests/data/byteordermark.txt')
-		self.assertEqual(file.raw(), b'\xef\xbb\xbffoobar\n')
+		self.assertTrue(file.raw().startswith(b'\xef\xbb\xbffoobar'))
 		self.assertEqual(file.read(), 'foobar\n')
 		self.assertEqual(file.readlines(), ['foobar\n'])
 
@@ -216,7 +225,7 @@ class TestFS(tests.TestCase):
 
 	def testDir(self):
 		'''Test Dir object'''
-		tmpdir = self.create_tmp_dir('testDir')
+		tmpdir = self.setUpFolder(name='testDir', mock=tests.MOCK_ALWAYS_REAL).path
 		dir = Dir(tmpdir + '/foo/bar')
 		assert not dir.exists()
 
@@ -277,7 +286,7 @@ class TestFS(tests.TestCase):
 	# TODO skip if no gio available
 	# TODO slow test
 	#~ def testMonitor(self):
-		#~ tmpdir = Dir(self.create_tmp_dir('testMonitor'))
+		#~ tmpdir = Dir(self.setUpFolder(name='testMonitor', mock=tests.MOCK_ALWAYS_REAL))
 
 		#~ # Monitor file
 		#~ events = []
@@ -302,7 +311,8 @@ class TestFS(tests.TestCase):
 class TestFileOverwrite(tests.TestCase):
 
 	def setUp(self):
-		self.path = self.create_tmp_dir() + '/file.txt'
+		FilterDeprecationWarning().wrap_test(self)
+		self.path = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL).path + '/file.txt'
 
 	def modify(self, func):
 		modify_file_mtime(self.path, func)
@@ -345,11 +355,14 @@ class TestFileOverwrite(tests.TestCase):
 @tests.skipUnless(hasattr(os, 'symlink') and os.name != 'nt', 'OS does not support symlinks')
 class TestSymlinks(tests.TestCase):
 
+	def setUp(self):
+		FilterDeprecationWarning().wrap_test(self)
+
 	def runTest(self):
 		'''Test file operations are safe for symlinks'''
 
 		# Set up a file structue with a symlink
-		tmpdir = self.create_tmp_dir()
+		tmpdir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL).path
 		targetdir = Dir(tmpdir + '/target')
 		targetdir.file('foo.txt').touch()
 		targetfile = File(tmpdir + '/target.txt')

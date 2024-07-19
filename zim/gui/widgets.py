@@ -40,7 +40,14 @@ import locale
 
 try:
 	import gi
-	gi.require_version('GtkSource', '3.0')
+
+	# Allow using GtkSourceView 4.x (requires Gtk 3.24) for systems that no
+	# longer provide 3.x.
+	try:
+		gi.require_version('GtkSource', '3.0')
+	except:
+		gi.require_version('GtkSource', '4')
+
 	from gi.repository import GtkSource
 except:
 	GtkSource = None
@@ -49,12 +56,12 @@ import zim
 
 import zim.errors
 import zim.config
-import zim.fs
 
-from zim.fs import File, Dir
+from zim.fs import adapt_from_oldfs
+from zim.newfs import FilePath, LocalFile, LocalFolder
 from zim.config import value_is_coord
-from zim.notebook import Notebook, Path, PageNotFoundError
-from zim.parsing import link_type
+from zim.notebook import Notebook, Path, HRef, PageNotFoundError
+from zim.parse.links import link_type
 from zim.signals import ConnectorMixin
 from zim.notebook.index import IndexNotFoundError
 from zim.actions import action
@@ -129,7 +136,7 @@ def gtk_window_set_default_icon():
 	from zim.config import ZIM_DATA_DIR, XDG_DATA_HOME, XDG_DATA_DIRS
 	iconlist = []
 	if ZIM_DATA_DIR:
-		dir = ZIM_DATA_DIR + '../icons'
+		dir = ZIM_DATA_DIR.parent().folder('icons')
 		for name in ('zim16.png', 'zim32.png', 'zim48.png'):
 			file = dir.file(name)
 			if file.exists():
@@ -138,13 +145,14 @@ def gtk_window_set_default_icon():
 	else:
 		sizes = ['16x16', '32x32', '48x48']
 		for dir in [XDG_DATA_HOME] + XDG_DATA_DIRS:
+			found = False
 			for size in sizes:
-				file = dir.file('icons/hicolor/%s/apps/zim.png' % size)
+				file = dir.file('icons/hicolor/%s/apps/org.zim_wiki.Zim.png' % size)
 				if file.exists():
-					sizes.remove(size)
+					found = True
 					pixbuf = GdkPixbuf.Pixbuf.new_from_file(file.path)
 					iconlist.append(pixbuf)
-			if not sizes:
+			if found: # Use icons from first folder where we find any of them
 				break
 
 	if not iconlist:
@@ -161,7 +169,7 @@ def gtk_window_set_default_icon():
 
 
 	if len(iconlist) < 3:
-		logger.warn('Could not find all icon sizes for the application icon')
+		logger.warning('Could not find all icon sizes for the application icon')
 	Gtk.Window.set_default_icon_list(iconlist)
 
 
@@ -328,29 +336,6 @@ def _gtk_popup_at_pointer_backward(menu, event, button):
 	menu.connect('destroy', lambda m: _ref_cache.pop(id(m)))
 	time = event.time if event else 0
 	menu.popup(None, None, None, None, button, time)
-
-
-def rotate_pixbuf(pixbuf):
-	'''Rotate the pixbuf to match orientation from EXIF info.
-	This is intended for e.g. photos that have EXIF information that
-	shows how the camera was held.
-	@returns: a new version of the pixbuf or the pixbuf itself.
-	'''
-	# For newer gtk we could use GdkPixbuf.Pixbuf.apply_embedded_orientation
-
-	# Values for orientation seen in some random snippet in gtkpod
-	o = pixbuf.get_option('orientation')
-	if o:
-		o = int(o)
-	if o == 3: # 180 degrees
-		return pixbuf.rotate_simple(GdkPixbuf.PixbufRotation.UPSIDEDOWN)
-	elif o == 6: # 270 degrees
-		return pixbuf.rotate_simple(GdkPixbuf.PixbufRotation.CLOCKWISE)
-	elif o == 9: # 90 degrees
-		return pixbuf.rotate_simple(GdkPixbuf.PixbufRotation.COUNTERCLOCKWISE)
-	else:
-		# No rotation info, older gtk version, or advanced transpose
-		return pixbuf
 
 
 def help_text_factory(text):
@@ -687,7 +672,7 @@ class SingleClickTreeView(Gtk.TreeView):
 
 
 class BrowserTreeView(SingleClickTreeView):
-	'''Sub-class of C{Gtk.TreeView} that is intended for hierarchic
+	r'''Sub-class of C{Gtk.TreeView} that is intended for hierarchic
 	lists that can be navigated in "browser mode". It inherits the
 	single-click behavior of L{SingleClickTreeView} and adds the
 	following keybindings:
@@ -970,7 +955,7 @@ class InputForm(Gtk.Table):
 			- "C{page}" - a page L{Path} (L{PageEntry})
 			- "C{namespace}" - a namespace L{Path} (L{NamespaceEntry})
 			- "C{link}" - a link as string (L{LinkEntry})
-			- "C{dir}" - a L{Dir} object (L{FolderEntry})
+			- "C{dir}" - a L{Folder} object (L{FolderEntry})
 			- "C{file}" - a L{File} object for an existing file (L{FileEntry})
 			- "C{image}" - like 'file' but specific for images
 			- "C{output-file}" - like 'file' but for new or existing file
@@ -1286,10 +1271,10 @@ class InputForm(Gtk.Table):
 				else:
 					widget.set_text(value or '')
 			elif isinstance(widget, FSPathEntry):
-				if isinstance(value, (File, Dir)):
-					widget.set_path(value)
-				else:
+				if not value or isinstance(value, str):
 					widget.set_text(value or '')
+				else:
+					widget.set_path(value)
 			elif isinstance(widget, InputEntry):
 				value = value or ''
 				widget.set_text(value)
@@ -1417,15 +1402,6 @@ class InputEntry(Gtk.Entry):
 		self.update_input_valid()
 		self.connect('changed', self.__class__.update_input_valid)
 
-		def _init_base_color(*a):
-			# This is handled on expose event, because style does not
-			# yet reflect theming on construction
-			if self._normal_color is None:
-				self._normal_color = self.style.base[Gtk.StateType.NORMAL]
-				self._set_base_color(self.get_input_valid())
-
-		#self.connect('expose-event', _init_base_color)
-
 	def set_check_func(self, check_func):
 		'''Set a function to check whether input is valid or not
 		@param check_func: the function
@@ -1508,22 +1484,19 @@ class InputEntry(Gtk.Entry):
 		if show_empty_invalid is not None:
 			self.show_empty_invalid = show_empty_invalid
 
-		if valid == self._input_valid:
-			return
+		if valid != self._input_valid:
+			self._input_valid = valid
+			self.emit('input-valid-changed')
 
-		#if self._normal_color:
-		#	self._set_base_color(valid)
-		# else: not yet initialized
-
-		self._input_valid = valid
-		self.emit('input-valid-changed')
-
-	def _set_base_color(self, valid):
-		if valid \
-		or (not self.get_text() and not self.show_empty_invalid):
-			self.modify_base(Gtk.StateType.NORMAL, self._normal_color)
+	def do_input_valid_changed(self):
+		context = self.get_style_context()
+		if not self.show_empty_invalid and not self.get_text():
+			# Maybe invalid, but don't show it
+			context.remove_class(Gtk.STYLE_CLASS_ERROR)
+		elif not self._input_valid:
+			context.add_class(Gtk.STYLE_CLASS_ERROR)
 		else:
-			self.modify_base(Gtk.StateType.NORMAL, Gdk.color_parse(self.ERROR_COLOR))
+			context.remove_class(Gtk.STYLE_CLASS_ERROR)
 
 	def clear(self):
 		'''Clear the text in the entry'''
@@ -1573,23 +1546,24 @@ class FSPathEntry(InputEntry):
 
 	def set_path(self, path):
 		'''Set the file path for this entry
-		@param path: a L{File} or L{Dir} object
+		@param path: a L{File} or L{Folder} object
 		'''
-		assert isinstance(path, (File, Dir))
+		path = adapt_from_oldfs(path)
+		assert isinstance(path, FilePath)
 		if self.notebook:
 			text = self.notebook.relative_filepath(path, self.notebookpath)
 			if text is None:
 				if self.notebook.document_root:
 					text = path.uri
 				else:
-					text = path.path
+					text = path.userpath
 			self.set_text(text)
 		else:
-			self.set_text(path.user_path or path.path)
+			self.set_text(path.userpath)
 
 	def get_path(self):
 		'''Get the file path for this entry
-		@returns: a L{File} or L{Dir} object (depending on sub-class)
+		@returns: a L{File} or L{Folder} object (depending on sub-class)
 		'''
 		text = self.get_text()
 		if text:
@@ -1626,7 +1600,7 @@ class FSPathEntry(InputEntry):
 			dialog.set_file(path)
 		elif self.notebook and self.notebookpath:
 			page = self.notebook.get_page(self.notebookpath)
-			dialog.set_current_dir(page.source.dir)
+			dialog.set_current_dir(page.source_file.parent())
 		elif self.notebook:
 			dialog.set_current_dir(self.notebook.folder)
 
@@ -1639,7 +1613,7 @@ class FSPathEntry(InputEntry):
 class FileEntry(FSPathEntry):
 	'''Widget to select a file'''
 
-	_class = File
+	_class = LocalFile
 
 	def __init__(self, file=None, new=False):
 		'''Constructor.
@@ -1666,12 +1640,12 @@ class FileEntry(FSPathEntry):
 class FolderEntry(FSPathEntry):
 	'''Widget to select a folder'''
 
-	_class = Dir
+	_class = LocalFolder
 
 	def __init__(self, folder=None):
 		'''Constructor
 
-		@param folder: a L{Dir} object
+		@param folder: a L{Folder} object
 		'''
 		FSPathEntry.__init__(self)
 		self.file_type_hint = 'dir'
@@ -1684,14 +1658,14 @@ class FolderEntry(FSPathEntry):
 	get_folder = FSPathEntry.get_path
 
 
-def gtk_entry_completion_match_func(completion, key, iter, column):
+def gtk_entry_completion_match_func_words(completion, key, iter, column):
 	if key is None:
 		return False
 
 	model = completion.get_model()
 	text = to_utf8_normalized_casefolded(model.get_value(iter, column))
 	if text is not None:
-		return key in text
+		return (key in text) or any(w in text for w in key.split())
 	else:
 		return False
 
@@ -1788,12 +1762,12 @@ class PageEntry(InputEntry):
 		'''
 		name = self.get_text().strip()
 		if not name or name == ':':
-		   if self._allow_select_root:
-			   self.set_input_valid(True)
-			   return Path(':')
-		   else:
-			   self.set_input_valid(False)
-			   return None
+			if self._allow_select_root:
+				self.set_input_valid(True)
+				return Path(':')
+			else:
+				self.set_input_valid(False)
+				return None
 		else:
 			if self.subpaths_only and name[0] not in ('+', ':'):
 				name = '+' + name
@@ -1809,7 +1783,7 @@ class PageEntry(InputEntry):
 					name = Path.makeValidPageName(name)
 					path = Path(name)
 			except ValueError:
-				logger.warn('Invalid path name: %s', name)
+				logger.warning('Invalid path name: %s', name)
 				self.set_input_valid(False)
 				return None
 			else:
@@ -1907,6 +1881,7 @@ class PageEntry(InputEntry):
 	def _fill_completion_for_anchor(self, path, prefix, text):
 		#print "COMPLETE ANCHOR", path, prefix, text
 		# Complete a single namespace based on the prefix
+		#
 		# TODO: allow filter on "text" directly in SQL call
 		completion = self.get_completion()
 		completion.set_match_func(gtk_entry_completion_match_func_startswith, 1)
@@ -1921,14 +1896,18 @@ class PageEntry(InputEntry):
 
 
 	def _fill_completion_any(self, path, text):
-		#print("COMPLETE ANY", path, text)
 		# Complete all matches of "text"
 		# start with children and peers, than peers of parents, than rest of tree
-		completion = self.get_completion()
-		completion.set_match_func(gtk_entry_completion_match_func, 1)
-
+		# and also look for matches where input is split in words,
+		# which can match at different offsets
+		#
 		# TODO: use SQL to list all at once instead of walking and filter on "text"
 		#       do better sorting as well ?
+
+		MAX = 20
+
+		completion = self.get_completion()
+		completion.set_match_func(gtk_entry_completion_match_func_words, 1)
 
 		if path.isroot:
 			def relative_link(target):
@@ -1938,21 +1917,31 @@ class PageEntry(InputEntry):
 				href = self.notebook.pages.create_link(path, target)
 				return href.to_wiki_link()
 
-		model = completion.get_model()
+		completion_set = set()
+
 		searchpath = list(path.parents())
 		searchpath.insert(1, path) # children after peers but before parents
 		for namespace in searchpath:
-			for p in self.notebook.pages.match_pages(namespace, text):
+			for p in self.notebook.pages.match_pages(namespace, text, limit=MAX):
 				link = relative_link(p)
-				model.append((link, p.basename))
+				completion_set.add((link, p.basename))
 
-			if len(model) > 10:
+			if len(completion_set) > MAX:
 				break
-		else:
-			for p in self.notebook.pages.match_all_pages(text, limit=20):
-				if p.parent not in searchpath:
-					link = relative_link(p)
-					model.append((link, p.basename))
+
+		if len(completion_set) < MAX:
+			for p in self.notebook.pages.match_all_pages(text, limit=MAX):
+				link = relative_link(p)
+				completion_set.add((link, p.basename))
+
+		if len(completion_set) < MAX:
+			for p in self.notebook.pages.match_all_pages_by_words(text.split(), limit=MAX):
+				link = relative_link(p)
+				completion_set.add((link, p.basename))
+
+		model = completion.get_model()
+		for i in completion_set:
+			model.append(i)
 
 
 class NamespaceEntry(PageEntry):
@@ -1971,7 +1960,7 @@ class LinkEntry(PageEntry, FileEntry):
 	zim page paths, file paths and URLs.
 	'''
 
-	_class = File
+	_class = LocalFile
 
 	def __init__(self, notebook, path=None):
 		'''Constructor
@@ -1985,16 +1974,9 @@ class LinkEntry(PageEntry, FileEntry):
 		self.file_type_hint = None
 
 	def get_path(self):
-		# Check we actually got a valid path
-		text = self.get_text()
-		if text:
-			type = link_type(text)
-			if type == 'page':
-				return PageEntry.get_path(self)
-			else:
-				return None
-		else:
-			return None
+		# TODO: proper check link syntax, including achor part instead
+		#       of just using PageEntry.get_path()
+		raise NotImplementedError
 
 	def update_input_valid(self):
 		# Switch between path completion and file completion
@@ -2002,7 +1984,13 @@ class LinkEntry(PageEntry, FileEntry):
 		if text:
 			type = link_type(text)
 			if type == 'page':
-				PageEntry.update_input_valid(self)
+				try:
+					href = HRef.new_from_wiki_link(text)
+				except ValueError:
+					self.set_input_valid(True)
+				else:
+					self.set_input_valid(href.names or href.anchor)
+						# Should not reduce to empty link
 			#~ elif type == 'file':
 				#~ FileEntry.update_input_valid(self)
 			else:
@@ -2039,7 +2027,10 @@ class uistate_property(object):
 			return obj.uistate[self.key]
 
 	def __set__(self, obj, value):
-		obj.uistate[self.key] = value
+		if obj:
+			if not self.key in obj.uistate:
+				obj.uistate.setdefault(self.key, *self.default)
+			obj.uistate[self.key] = value
 
 
 # Some constants used to position widgets in the window panes
@@ -2056,6 +2047,18 @@ PANE_POSITIONS = (
 	(RIGHT_PANE, _('Right Side Pane')), # T: Option for placement of plugin widgets
 	(BOTTOM_PANE, _('Bottom Pane')), # T: Option for placement of plugin widgets
 	(TOP_PANE, _('Top Pane')), # T: Option for placement of plugin widgets
+)
+
+TOP = 'top'
+BOTTOM = 'bottom'
+LEFT = 'left'
+RIGHT = 'right'
+
+POSITIONS = (
+	(TOP, _('Top')), # T: position of widget in window
+	(BOTTOM, _('Bottom')), # T: position of widget in window
+	(LEFT, _('Left')), # T: position of widget in window
+	(RIGHT, _('Right')), # T: position of widget in window
 )
 
 
@@ -2091,7 +2094,6 @@ class WindowSidePane(Gtk.VBox):
 		self.notebook.set_show_border(False)
 		button = self._close_button()
 		self.notebook.set_action_widget(button, Gtk.PackType.END)
-
 		self.add(self.notebook)
 
 		self._update_topbar()
@@ -2129,19 +2131,28 @@ class WindowSidePane(Gtk.VBox):
 		else:
 			self._show_multiple_tabs()
 
-	def _set_topbar_label(self, label):
-		assert isinstance(label, Gtk.Label)
-		label.set_alignment(0.03, 0.5)
+	def _set_topbar_label(self, widget):
+		if widget:
+			label = widget.get_title_label()
+			label.set_alignment(0.03, 0.5)
+			label.show()
+			ebox = Gtk.EventBox()
+			ebox.add(label)
+			ebox.connect('button-press-event', self.__class__.on_title_button_press_event, widget)
+		else:
+			label = Gtk.Label(label='')
+			ebox = None
+
 		for child in self.topbar.get_children():
-			if isinstance(child, Gtk.Label):
+			if isinstance(child, (Gtk.Label, Gtk.EventBox)):
 				child.destroy()
-		self.topbar.pack_start(label, True, True, 0)
+		self.topbar.pack_start(ebox or label, True, True, 0)
 
 	def _show_empty_topbar(self):
 		self.notebook.set_show_tabs(False)
 		_hide(self.notebook.get_action_widget(Gtk.PackType.END))
 
-		self._set_topbar_label(Gtk.Label(label=''))
+		self._set_topbar_label(None)
 		_show(self.topbar)
 
 	def _show_single_tab(self):
@@ -2149,7 +2160,7 @@ class WindowSidePane(Gtk.VBox):
 		_hide(self.notebook.get_action_widget(Gtk.PackType.END))
 
 		child = self.notebook.get_nth_page(0)
-		self._set_topbar_label(child.get_title_label())
+		self._set_topbar_label(child)
 		if isinstance(child, WindowSidePaneWidget) \
 			and child.set_embeded_closebutton(self._close_button()):
 				_hide(self.topbar)
@@ -2158,18 +2169,45 @@ class WindowSidePane(Gtk.VBox):
 
 	def _show_multiple_tabs(self):
 		self.notebook.set_show_tabs(True)
-		self._set_topbar_label(Gtk.Label(label=''))
+		self._set_topbar_label(None)
 		# Show close button next to notebook tabs
 		_show(self.notebook.get_action_widget(Gtk.PackType.END))
 		_hide(self.topbar)
 
-	def add_tab(self, key, widget):
+	def add_sidepane_widget(self, key: str, widget: 'WindowSidePaneWidget'):
+		'''Add a sidepane widget to this sidepane
+		@param key: string identifyer or the widget, typically the class name
+		@param widget: a C{WindowSidePaneWidget}
+		'''
 		assert isinstance(widget, WindowSidePaneWidget)
 		assert widget.title is not None
+		if self.key in (TOP_PANE, BOTTOM_PANE):
+			widget.set_orientation(Gtk.Orientation.HORIZONTAL)
+		else:
+			widget.set_orientation(Gtk.Orientation.VERTICAL)
 		widget.tab_key = key
-		self.notebook.append_page(widget, widget.get_title_label())
+		label = widget.get_title_label()
+		label.show()
+		ebox = Gtk.EventBox()
+		ebox.add(label)
+		ebox.connect('button-press-event', self.__class__.on_title_button_press_event, widget)
+		self.notebook.append_page(widget, ebox)
 		self.notebook.set_tab_reorderable(widget, True)
 		self._update_topbar()
+
+	def on_title_button_press_event(self, event, widget):
+		if event.type == Gdk.EventType.BUTTON_PRESS and event.button == 3:
+			# popover on secondairy mouse click
+			popover = widget.get_popover_menu()
+			if popover is not None:
+				popover.set_relative_to(self)
+				rect = Gdk.Rectangle()
+				rect.x, rect.y = self.get_pointer()
+				rect.width, rect.height = 1, 1
+				popover.set_pointing_to(rect)
+				popover.set_position(Gtk.PositionType.BOTTOM)
+				popover.show_all()
+				popover.popup()
 
 	def remove(self, widget):
 		if widget in self.notebook.get_children():
@@ -2290,8 +2328,24 @@ class WindowSidePaneWidget(ConnectorMixin):
 	L{WindowSidePane}
 	'''
 
+	title = 'NAME' #: title used for label above the widget
+	_info_text = None
+
+	def set_info(self, text):
+		'''Set info text for the widget, displayed instead of title
+		@param text: label text or C{None} to unset
+		'''
+		self._info_text = text
+		if hasattr(self, '_title_labels'):
+			for label in self._title_labels:
+				label.set_text_with_mnemonic(text)
+
 	def get_title_label(self):
-		label = Gtk.Label(label=self.title)
+		'''Create a C{Gtk.Label} containing the title or info text
+		This label will dynamically be updated
+		'''
+		text = self._info_text or self.title
+		label = Gtk.Label.new_with_mnemonic(text)
 		if not hasattr(self, '_title_labels'):
 			self._title_labels = set()
 		self._title_labels.add(label)
@@ -2302,11 +2356,58 @@ class WindowSidePaneWidget(ConnectorMixin):
 		if hasattr(self, '_title_labels'):
 			self._title_labels.remove(label)
 
-	def set_title(self, text):
-		self.title = text
-		if hasattr(self, '_title_labels'):
-			for label in self._title_labels:
-				label.set_text(text)
+	def get_popover_menu(self):
+		'''Returns a C{Gtk.Popover} for this side widget
+		Usually displayed on a "right-click" on the title of the widget.
+		Will by default contain an item to open the plugin preferences.
+		Sub-classes can implement L{populate_popover_menu()} to add more items.
+		'''
+		popover = Gtk.Popover()
+		vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+		popover.add(vbox)
+		self.populate_popover_menu(vbox)
+
+		if self.can_show_plugin_preferences():
+			button = Gtk.Button(_('Preferences...')) # T: label for menu item which opens preferences dialog
+			button.connect('clicked', lambda b: self.show_plugin_preferences())
+			vbox.add(button)
+
+		if len(vbox.get_children()) > 0:
+			for child in vbox.get_children():
+				if isinstance(child, Gtk.Button):
+					child.connect('clicked', lambda b: popover.popdown())
+			return popover
+		else:
+			return None
+
+	def populate_popover_menu(self, vbox):
+		'''Callback to populate the popover menu
+		Items can be added to C{vbox}
+		'''
+		pass
+
+	def get_plugin(self):
+		'''Returns the plugin object if this widget is defined in a plugin module, else C{None}
+		This method relies on the singleton nature of the C{PluginManager}
+		'''
+		from zim.plugins import get_plugin_key, PluginManager
+		try:
+			name = get_plugin_key(self)
+			return PluginManager.get(name)
+		except AssertionError:
+			return None
+
+	def can_show_plugin_preferences(self):
+		'''Returns C{True} if L{show_preferences()} is likely to succeed'''
+		plugin = self.get_plugin()
+		return plugin and plugin.plugin_preferences
+
+	def show_plugin_preferences(self):
+		'''Show the preferences dialog for the asociated plugin'''
+		plugin = self.get_plugin()
+		if not plugin:
+			raise AssertionError('No plugin found for %s' % self)
+		plugin.show_preferences(self)
 
 	def set_embeded_closebutton(self, button):
 		'''Embed a button in the widget to close the side pane
@@ -2315,14 +2416,25 @@ class WindowSidePaneWidget(ConnectorMixin):
 		'''
 		return False
 
+	def set_orientation(self, orientation):
+		'''Set orientation of the widget
+		This method will be called when the widget is added to the pane.
+        Widgets can use this to better align to the orientation of the
+        enclosing pane. If the widget is a C{Gtk.Box} or a different
+		C{Gtk.Orientable} this method is already implemented in the Gtk widget.
+		@param orientation: one of C{Gtk.Orientation.VERTICAL} or C{Gtk.Orientation.HORIZONTAL}
+		'''
+		pass
+
 
 from zim.config import ConfigDefinition, ConfigDefinitionByClass, StringAllowEmpty
 
 class ConfigDefinitionPaneToggle(ConfigDefinition):
 
-	def __init__(self, default, window):
-		ConfigDefinition.__init__(self, default)
-		self.window = window
+	default = (LEFT_PANE, RIGHT_PANE, TOP_PANE, BOTTOM_PANE)
+
+	def __init__(self):
+		ConfigDefinition.__init__(self, self.default)
 
 	def check(self, value):
 		# Must be list of valid pane names
@@ -2330,7 +2442,7 @@ class ConfigDefinitionPaneToggle(ConfigDefinition):
 			value = self._eval_string(value)
 
 		if isinstance(value, (tuple, list)) \
-		and all(e in self.window._zim_window_sidepanes for e in value):
+		and all(e in self.default for e in value):
 			return value
 		else:
 			raise ValueError('Unknown pane names in: %s' % value)
@@ -2395,11 +2507,13 @@ class Window(Gtk.Window):
 
 	def __init__(self):
 		GObject.GObject.__init__(self)
-		self._registered = False
+		self._uistate_initialized = False
 		self._last_sidepane_focus = None
 
 		# Construct all the components
+		self._zim_window_overlay = Gtk.Overlay()
 		self._zim_window_main = Gtk.VBox() # contains bars & central hbox
+		self._zim_window_main.set_name('zim-window-main-box')
 
 		self._zim_window_central_hbox = Gtk.HBox() # contains left paned(right paned(central vbox))
 		self._zim_window_left_paned = HPaned()
@@ -2419,7 +2533,8 @@ class Window(Gtk.Window):
 		self._zim_window_bottom_minimized = HMinimizedTabs(self._zim_window_bottom_pane)
 
 		# put it all together ...
-		Gtk.Window.add(self, self._zim_window_main)
+		Gtk.Window.add(self, self._zim_window_overlay)
+		self._zim_window_overlay.add(self._zim_window_main)
 		self._zim_window_main.add(self._zim_window_central_hbox)
 		self._zim_window_central_hbox.pack_start(self._zim_window_left_minimized, False, True, 0)
 		self._zim_window_central_hbox.add(self._zim_window_left_paned)
@@ -2468,7 +2583,7 @@ class Window(Gtk.Window):
 			pane.connect('close', lambda o, k: self.set_pane_state(k, False), key)
 			pane.zim_pane_state = (False, 200, None)
 			minimized.set_no_show_all(True)
-			minimized.connect('clicked', lambda o, a, k: self.set_pane_state(k, True, activetab=a), key)
+			minimized.connect('clicked', lambda o, a, k: self.set_pane_state(k, True, activetab=a, grab_focus=True), key)
 
 			pane.notebook.connect_after('switch-page', _on_switch_page, key)
 
@@ -2478,24 +2593,24 @@ class Window(Gtk.Window):
 		'''
 		self._zim_window_bottom_paned.pack1(widget, resize=True)
 
-	def add_bar(self, widget, start=True):
+	def add_bar(self, widget, position):
 		'''Add a bar to top or bottom of the window. Used e.g. to add
 		menu-, tool- & status-bars.
 		@param widget: gtk widget for the bar
-		@param start: if C{True} add to top of window, else to bottom
+		@param position: position of the bar in the window C{TOP}, C{BOTTOM}, C{LEFT} or C{RIGHT}
 		'''
-		self._zim_window_main.pack_start(widget, False, True, 0)
-
-		if start:
-			# reshuffle widget to go above main widgets but
-			# below earlier added bars
-			i = self._zim_window_main.child_get_property(
-					self._zim_window_central_hbox, 'position')
-			self._zim_window_main.reorder_child(widget, i)
-
-		#self._zim_window_main.set_focus_chain([self._zim_window_left_paned])
-			# Force to ignore the bars in keyboard navigation
-			# items in the bars are all accesible by accelerators
+		if position in (TOP, BOTTOM):
+			self._zim_window_main.pack_start(widget, False, True, 0)
+			if position == TOP:
+				# reshuffle widget to go above main widgets but
+				# below earlier added bars
+				i = self._zim_window_main.child_get_property(
+						self._zim_window_central_hbox, 'position')
+				self._zim_window_main.reorder_child(widget, i)
+		else: # LEFT, RIGHT
+			self._zim_window_central_hbox.pack_start(widget, False, True, 0)
+			if position == LEFT:
+				self._zim_window_central_hbox.reorder_child(widget, 0)
 
 	def add_center_bar(self, widget):
 		'''Add a widget in the central part of the window above the
@@ -2513,16 +2628,15 @@ class Window(Gtk.Window):
 		statusbar.pack_end(frame, False, True, 0)
 		frame.show_all()
 
-	def add_tab(self, key, widget, pane):
-		'''Add a tab in one of the panes.
-		@param key: string that is used to identify this tab in the window state
-		@param widget: the gtk widget to show in the tab
-		@param pane: can be one of: C{LEFT_PANE}, C{RIGHT_PANE},
-		C{TOP_PANE} or C{BOTTOM_PANE}.
+	def add_sidepane_widget(self, key: str, widget: 'WindowSidePaneWidget', pane):
+		'''Add a sidepane widget to this window
+		@param key: string identifyer or the widget, typically the class name
+		@param widget: a C{WindowSidePaneWidget}
+		@param pane: can be one of: C{LEFT_PANE}, C{RIGHT_PANE}, C{TOP_PANE} or C{BOTTOM_PANE}.
 		'''
 		pane_key = pane
 		paned, pane, mini = self._zim_window_sidepanes[pane_key]
-		pane.add_tab(key, widget)
+		pane.add_sidepane_widget(key, widget)
 		self.set_pane_state(pane_key, True)
 
 	def remove(self, widget):
@@ -2532,7 +2646,10 @@ class Window(Gtk.Window):
 		if self._last_sidepane_focus == widget:
 			self._last_sidepane_focus = None
 
-		for parent in (self._zim_window_central_vbox, self._zim_window_bottom_paned):
+		for parent in (
+			self._zim_window_main, self._zim_window_central_hbox,
+			self._zim_window_central_vbox, self._zim_window_bottom_paned
+		):
 			if widget in parent.get_children():
 				parent.remove(widget)
 				return
@@ -2547,9 +2664,8 @@ class Window(Gtk.Window):
 			raise ValueError('Widget not found in this window')
 
 	def init_uistate(self):
-		assert self.uistate
 		self.uistate.define((
-			('toggle_panes', ConfigDefinitionPaneToggle([], self)),
+			('toggle_panes', ConfigDefinitionPaneToggle()),
 		))
 
 		for key in (LEFT_PANE, RIGHT_PANE, TOP_PANE, BOTTOM_PANE):
@@ -2560,14 +2676,17 @@ class Window(Gtk.Window):
 			))
 			self.set_pane_state(key, *self.uistate[key])
 			self._set_pane_ordering(key, self.uistate[key + '_order'])
+		self._uistate_initialized = True
 
 	def save_uistate(self):
+		if not self._uistate_initialized:
+			return # init_uistate() not yet called (!?)
 		assert self.uistate is not None
+
 		for key in (LEFT_PANE, RIGHT_PANE, TOP_PANE, BOTTOM_PANE):
 			if key in self.uistate:
 				self.uistate[key] = self.get_pane_state(key)
 				self.uistate[key + '_order'] = self._get_pane_ordering(key)
-			# else pass - init_uistate() not yet called (!?)
 
 	def _get_pane_ordering(self, key):
 		paned, pane, mini = self._zim_window_sidepanes[key]
@@ -2593,9 +2712,11 @@ class Window(Gtk.Window):
 			position = paned.get_position()
 			widget = gtk_notebook_get_active_page(pane.notebook)
 			active = widget.tab_key if widget else None
-			return (True, position, active)
+			pane_state = (True, position, active)
+			pane.zim_pane_state = pane_state
+			return pane_state
 		else:
-			return pane.zim_pane_state
+			return pane.zim_pane_state # If hidden we cannot query position etc.
 
 		return state
 
@@ -2715,7 +2836,7 @@ class Window(Gtk.Window):
 	def focus_sidepane(self):
 		try:
 			self.focus_last_focussed_sidepane() \
-				or self.get_visible_panes()[0].grab_focus()
+				or self.get_visible_panes()[0].notebook.grab_focus()
 		except IndexError:
 			pass
 
@@ -2734,14 +2855,7 @@ class Window(Gtk.Window):
 		self.show_all()
 
 	def show_all(self):
-		# First register, than init uistate - this ensures plugins
-		# are enabled before we finalize the presentation of the window.
-		# This is important for state of e.g. panes to work correctly
-		if not self._registered:
-			self._registered = True
-			if hasattr(self, 'uistate'):
-				self.init_uistate()
-
+		self.init_uistate()
 		if not TEST_MODE:
 			Gtk.Window.show_all(self)
 
@@ -2846,7 +2960,6 @@ class Dialog(Gtk.Dialog, ConnectorMixin):
 		self.connect('destroy', self.__class__.on_destroy)
 
 		self.result = None
-		self._registered = False
 		self.set_border_width(10)
 		self.vbox.set_spacing(5)
 
@@ -2903,6 +3016,16 @@ class Dialog(Gtk.Dialog, ConnectorMixin):
 		self.disconnect_all()
 		self.destroyed = True
 
+	def get_application(self):
+		app = Gtk.Dialog.get_application(self)
+		if app:
+			return app
+		else:
+			window = self.get_transient_for()
+			if not window:
+				raise AssertionError('No application set and no transient window for dialog: %s' % self)
+		return window.get_application()
+
 	#{ Layout methods
 
 	def add_extra_button(self, button, pack_start=True):
@@ -2933,8 +3056,8 @@ class Dialog(Gtk.Dialog, ConnectorMixin):
 		@param page: the manual page, if C{None} the page as set with
 		L{set_help()} is used
 		'''
-		from zim.main import ZIM_APPLICATION
-		ZIM_APPLICATION.run('--manual', page or self.help_page)
+		application = self.get_application()
+		application.open_manual(page or self.help_page)
 
 	def add_help_text(self, text):
 		'''Adds a label with an info icon in front of it. Intended for
@@ -3039,8 +3162,6 @@ class Dialog(Gtk.Dialog, ConnectorMixin):
 
 	def show_all(self):
 		logger.debug('Opening dialog "%s"', self.get_title())
-		if not self._registered:
-			self._registered = True
 
 		if not TEST_MODE:
 			Gtk.Dialog.show_all(self)
@@ -3130,6 +3251,7 @@ class Dialog(Gtk.Dialog, ConnectorMixin):
 		@implementation: can be implemented by sub-classes that have
 		an "Cancel" button
 		'''
+		self.result = None # just to be sure, might have set by response_ok handler which subsequently failed
 		return True
 
 	def save_uistate(self):
@@ -3520,7 +3642,7 @@ class FileDialog(Dialog):
 	def set_current_dir(self, dir):
 		'''Set the current folder for the dialog
 		(Only needed if not followed by L{set_file()})
-		@param dir: a L{Dir} object
+		@param dir: a L{Folder} object
 		'''
 		ok = self.filechooser.set_current_folder_uri(dir.uri)
 		if not ok:
@@ -3551,15 +3673,15 @@ class FileDialog(Dialog):
 
 		if path:
 			page = notebook.get_page(path)
-			if hasattr(page, 'source') and page.source is not None:
+			if page and page.source_file is not None:
 				try:
-					self.filechooser.add_shortcut_folder(page.source.dir.path)
+					self.filechooser.add_shortcut_folder(page.source_file.dirname)
 				except:
 					pass # GError on doubles ..
 
 	def set_file(self, file):
 		'''Set the file or dir to pre select in the dialog
-		@param file: a L{File} or L{Dir} object
+		@param file: a L{File} or L{Folder} object
 		'''
 		ok = self.filechooser.set_uri(file.uri)
 		if not ok:
@@ -3571,14 +3693,14 @@ class FileDialog(Dialog):
 
 	def get_file(self):
 		'''Get the current selected file
-		@returns: a L{File} object or C{None}.
+		@returns: a L{LocalFile} object or C{None}.
 		'''
 		if self.filechooser.get_select_multiple():
 			raise AssertionError('Multiple files selected, use get_files() instead')
 
 		uri = self.filechooser.get_uri()
 		if uri:
-			return File(uri)
+			return LocalFile(uri)
 		elif TEST_MODE and hasattr(self, '_file') and self._file:
 			return self._file
 		else:
@@ -3587,9 +3709,9 @@ class FileDialog(Dialog):
 	def get_files(self):
 		'''Get list of selected file. Assumes the dialog was created
 		with C{multiple=True}.
-		@returns: a list of L{File} objects
+		@returns: a list of L{LocalFile} objects
 		'''
-		files = [File(uri) for uri in self.filechooser.get_uris()]
+		files = [LocalFile(uri) for uri in self.filechooser.get_uris()]
 		if files:
 			return files
 		elif TEST_MODE and hasattr(self, '_file') and self._file:
@@ -3601,13 +3723,13 @@ class FileDialog(Dialog):
 		'''Get the the current selected dir. Assumes the dialog was
 		created with action C{Gtk.FileChooserAction.SELECT_FOLDER} or
 		C{Gtk.FileChooserAction.CREATE_FOLDER}.
-		@returns: a L{Dir} object or C{None}
+		@returns: a L{LocalFolder} object or C{None}
 		'''
 		if self.filechooser.get_select_multiple():
 			raise AssertionError('Multiple files selected, use get_files() instead')
 
 		uri = self.filechooser.get_uri()
-		return Dir(uri) if uri else None
+		return LocalFolder(uri) if uri else None
 
 	def _add_filter_all(self):
 		filter = Gtk.FileFilter()
@@ -3735,7 +3857,7 @@ class ProgressDialog(Gtk.Dialog):
 		else:
 			self.progressbar.set_fraction(frac)
 			self.progressbar.set_text(_('{count} of {total}').format(count=i, total=total))
-			 	# T: lable in progressbar giving number of items and total
+				# T: lable in progressbar giving number of items and total
 
 		if msg is None:
 			self.msg_label.set_text('')
@@ -4081,7 +4203,7 @@ class ImageView(Gtk.Layout):
 		a fixed factor.
 		@param factor: static scaling factor (in combination with C{SCALE_STATIC})
 		'''
-		assert scaling in (SCALE_FIT, SCALE_STATIC)
+		assert scaling in (self.SCALE_FIT, self.SCALE_STATIC)
 		self.scaling = scaling
 		self.factor = factor
 		self._render()
@@ -4094,7 +4216,7 @@ class ImageView(Gtk.Layout):
 
 		if file and file.exists():
 			try:
-				pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(file))
+				pixbuf = GdkPixbuf.Pixbuf.new_from_file(file.path)
 			except:
 				logger.exception('Could not load image "%s"', file)
 		else:
@@ -4181,3 +4303,41 @@ class ImageView(Gtk.Layout):
 		self._image.set_from_pixbuf(pixbuf)
 		self.set_size(wvirt, hvirt)
 		self.move(self._image, (wvirt - wimg) / 2, (hvirt - himg) / 2)
+
+
+class StatusPage(Gtk.Bin):
+	'''Widget to use e.g. as a placeholder for an empty view'''
+
+	def __init__(self, icon_name, title, info_text=None):
+		'''Constructor
+		@param icon_name: Icon to show as image, should be an "symbolic" icon name.
+		Can be C{None} if no suitable icon is available
+		@param title: Main message to show, should be rather short.
+		Can be C{None} but should be used only in very specific cases
+		@param info_text: Optional informational text to show below the title
+		'''
+		GObject.GObject.__init__(self)
+		box = Gtk.Box()
+		box.set_orientation(Gtk.Orientation.VERTICAL)
+		box.set_halign(Gtk.Align.CENTER)
+		box.set_valign(Gtk.Align.CENTER)
+		box.set_spacing(12)
+		self.add(box)
+
+		if icon_name:
+			image = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DIALOG)
+			image.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
+			box.add(image)
+
+		if title:
+			label = Gtk.Label()
+			label.set_markup("<span size=\"large\">%s</span>" % title)
+			label.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
+			box.add(label)
+
+		if info_text:
+			label = Gtk.Label(info_text)
+			label.set_line_wrap(True)
+			label.set_justify(Gtk.Justification.CENTER)
+			label.get_style_context().add_class(Gtk.STYLE_CLASS_DIM_LABEL)
+			box.add(label)

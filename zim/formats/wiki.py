@@ -8,16 +8,12 @@ import logging
 
 logger = logging.getLogger('zim.formats.wiki')
 
-from zim.parser import Rule, fix_line_end, convert_space_to_tab
-from zim.parser import Parser as RuleParser
-from zim.parsing import url_encode, URL_ENCODE_DATA, \
-	escape_string, unescape_string, split_escaped_string
-from zim.parsing import url_re as old_url_re
+from zim.parse import convert_space_to_tab, fix_unicode_whitespace
+from zim.parse.regexparser import Rule, RegexParser
+from zim.parse.links import is_url_link, match_url_link, url_link_re, old_url_link_re
 from zim.formats import *
 from zim.formats.plain import Dumper as TextDumper
-
-old_url_re = old_url_re.p
-
+from zim.parse.encode import escape_string, split_escaped_string, unescape_string, url_encode, URL_ENCODE_DATA
 
 WIKI_FORMAT_VERSION = 'zim 0.6'
 assert WIKI_FORMAT_VERSION != 'zim 0.26' # skip number for historic reasons
@@ -40,33 +36,24 @@ info = {
 }
 
 
-bullet_pattern = '(?:[\\*\u2022]|\\[[ \\*x>]\\]|\\d+\\.|[a-zA-Z]\\.)[\\ \\t]+'
+bullet_pattern = '(?:[\\*\u2022]|\\[[ \\*x><]\\]|\\d+\\.|[a-zA-Z]\\.)[\\ \\t]+'
 	# bullets can be '*' or 0x2022 for normal items
-	# and '[ ]', '[*]', '[x]' or '[>]' for checkbox items
+	# and '[ ]', '[*]', '[x]', '[>]' or [<]' for checkbox items
 	# and '1.', '10.', or 'a.' for numbered items (but not 'aa.')
 
-bullet_line_re = re.compile(r'^(\t*)(%s)(.*\n)$' % bullet_pattern)
+bullet_line_re = re.compile(r'^(\t*)(%s)(.*$\n?)' % bullet_pattern)
 	# matches list item: prefix, bullet, text
 
-number_bullet_re = re.compile('^(\d+|[a-zA-Z])\.$')
-def check_number_bullet(bullet):
-	'''If bullet is a numbered bullet this returns the number or letter,
-	C{None} otherwise
-	'''
-	m = number_bullet_re.match(bullet)
-	if m:
-		return m.group(1)
-	else:
-		return None
+number_bullet_re = re.compile(r'^(\d+|[a-zA-Z])\.$')
 
-param_re = re.compile('([\w-]+)=("(?:[^"]|"{2})*"|\S*)')
+param_re = re.compile(r'([\w-]+)=("(?:[^"]|"{2})*"|\S*)')
 	# matches parameter list for objects
 	# allow name="foo bar" and name=Foo
 
 empty_lines_re = re.compile(r'((?:^[ \t]*\n)+)', re.M | re.U)
 	# match multiple empty lines
 
-unindented_line_re = re.compile('^\S', re.M)
+unindented_line_re = re.compile(r'^\S', re.M)
 	# match any unindented line
 
 
@@ -74,98 +61,6 @@ def _remove_indent(text, indent):
 	return re.sub('(?m)^' + indent, '', text)
 		# Specify "(?m)" instead of re.M since "flags" keyword is not
 		# supported in python 2.6
-
-
-# NOTE: we follow rules of GFM spec, except:
-#  - we allow any URL scheme
-#  - we add a file URI match
-#  - do not allow to start with "__" because of conflict with mark markup parsing
-# For GFM Markdown parser, remove these exceptions
-#
-# File paths cannot contain '\', '/', ':', '*', '?', '"', '<', '>', '|'
-# These are valid URL / path seperators: / \ : ? |
-# So restrict matching " < > and also '
-url_re = re.compile(
-	'\\b(?!__)(?P<url>'
-
-	'(www\.|https?://|\w+://)'			# autolink & autourl prefix
-	'(?P<domain>([\w\-]+\.)+[\w\-]+)' 	# 2 or more domain sections
-	'[^\s<]*'					# any non-space char except "<"
-
-	')|(?!__)(?P<email>'
-
-	'(mailto:)?'
-	'[\w\.\-_+]+@'				# email prefix
-	'([\w\-_]+\.)+[\w\-_]+'	# email domain
-
-	')|(?P<fileuri>'
-
-	'file:/+'
-	'[^\s"<>\']+'
-
-	')', re.U
-)
-
-url_trailing_punctuation = ('?', '!', '.', ',', ':', '*', '_', '~')
-
-
-def is_url(text):
-	'''Matches url_re and number of closing brackets matches
-	See L{https://github.github.com/gfm/#autolinks-extension-}
-	@param text: text to match as url
-	@returns: C{True} if C{text} is a valid url according to GFM rules
-	'''
-	url = match_url(text)
-	return url == text # No trailing puntuation or ")" excluded
-
-
-def match_url(text):
-	'''Match regex and count number of closing brackets
-	See L{https://github.github.com/gfm/#autolinks-extension-}
-	@param text: text to match as url
-	@returns: the url or None
-	'''
-	m = url_re.match(text)
-	if m:
-		url = m.group(0)
-		if m.lastgroup == 'email':
-			# Do not allow end in "-" or "_", use trailing "."
-			# modified rule from GFM to allow trailing __ because of mark markup
-			while url:
-				if url[-1] == '.':
-					url = url[:-1]
-				elif url[-1] == '_' and url[-2] == '_':
-					url = url[:-2]
-				elif url[-1] in ('-', '_'):
-					return None
-				else:
-					break
-			return url or None
-
-		# continue processing regular URL or file URI
-		if m.lastgroup == 'url':
-			domain = m.group('domain').split('.')
-			if '_' in domain[-1] or '_' in domain[-2]:
-				# Last two domain sections cannot contain "_"
-				return None
-	else:
-		return None
-
-	while url:
-		if url[-1] in url_trailing_punctuation \
-			or (url[-1] == ')' and url.count(')') > url.count('(')):
-				url = url[:-1]
-		elif url[-1] == ';':
-			m = re.search('&\w+;$', url)
-			if m:
-				ref = m.group(0)
-				url = url[:-len(ref)]
-			else:
-				url = url[:-1]
-		else:
-			return url
-	else:
-		return None
 
 
 class WikiParser(object):
@@ -180,6 +75,7 @@ class WikiParser(object):
 		'[x]': XCHECKED_BOX,
 		'[*]': CHECKED_BOX,
 		'[>]': MIGRATED_BOX,
+		'[<]': TRANSMIGRATED_BOX,
 		'*': BULLET,
 	}
 
@@ -192,12 +88,13 @@ class WikiParser(object):
 
 	def __call__(self, builder, text):
 		builder.start(FORMATTEDTEXT)
-		self.block_parser(builder, text)
+		if text:
+			self.block_parser(builder, text)
 		builder.end(FORMATTEDTEXT)
 
 	def _init_inline_parse(self):
 		# Rules for inline formatting, links and tags
-		my_url_re = old_url_re if self.backward_url_parsing else url_re
+		my_url_re = old_url_link_re if self.backward_url_parsing else url_link_re
 
 		descent = lambda *a: self.nested_inline_parser_below_link(*a)
 		self.nested_inline_parser_below_link = (
@@ -209,13 +106,13 @@ class WikiParser(object):
 			| Rule(SUPERSCRIPT, r'\^\{(?!~)(.+?)\}', descent=descent)
 			| Rule(STRIKE, r'~~(?!~)(.+?)~~', descent=descent)
 			| Rule(VERBATIM, r"''(?!')(.+?)''")
-
 		)
 
 		descent = lambda *a: self.inline_parser(*a)
 		return (
 			Rule(LINK, my_url_re, process=self.parse_url)
 			| Rule(LINK, r'\[\[(?!\[)(.*?\]*)\]\]', process=self.parse_link)
+			| Rule(ANCHOR, r'\{\{id:\s+(\w[\w-]+)\s*\}\}', process=self.parse_anchor) # HACK, hardcode inline object syntax
 			| Rule(IMAGE, r'\{\{(?!\{)(.*?)\}\}', process=self.parse_image)
 			| Rule(TAG, r'(?<!\S)@\w+', process=self.parse_tag)
 			| Rule(EMPHASIS, r'//(?!/)(.*?)(?<!:)//', descent=descent) # no ':' at the end (ex: 'http://')
@@ -231,13 +128,13 @@ class WikiParser(object):
 		# Intermediate level, breaks up lists and indented blocks
 		# TODO: deprecate this by taking lists out of the para
 		#       and make a new para for each indented block
-		p = RuleParser(
+		p = RegexParser(
 			Rule(
 				'X-Bullet-List',
 				r'''(
-					^ %s .* \n								# Line starting with bullet
+					^ %s .* $\n?							# Line starting with bullet
 					(?:
-						^ \t* %s .* \n						# Line with same or more indent and bullet
+						^ \t* %s .* $\n?					# Line with same or more indent and bullet
 					)*										# .. repeat
 				)''' % (bullet_pattern, bullet_pattern),
 				process=self.parse_list
@@ -245,9 +142,9 @@ class WikiParser(object):
 			Rule(
 				'X-Indented-Bullet-List',
 				r'''(
-					^(?P<list_indent>\t+) %s .* \n			# Line with indent and bullet
+					^(?P<list_indent>\t+) %s .* $\n?		# Line with indent and bullet
 					(?:
-						^(?P=list_indent) \t* %s .* \n		# Line with same or more indent and bullet
+						^(?P=list_indent) \t* %s .* $\n?	# Line with same or more indent and bullet
 					)*										# .. repeat
 				)''' % (bullet_pattern, bullet_pattern),
 				process=self.parse_list
@@ -255,10 +152,10 @@ class WikiParser(object):
 			Rule(
 				'X-Indented-Block',
 				r'''(
-					^(?P<block_indent>\t+) .* \n			# Line with indent
+					^(?P<block_indent>\t+) .* $\n?			 # Line with indent
 					(?:
-						^(?P=block_indent) (?!\t|%s) .* \n	# Line with _same_ indent, no bullet
-					)*										# .. repeat
+						^(?P=block_indent) (?!\t|%s) .* $\n? # Line with _same_ indent, no bullet
+					)*										 # .. repeat
 				)''' % bullet_pattern,
 				process=self.parse_indent
 			),
@@ -268,7 +165,7 @@ class WikiParser(object):
 
 	def _init_block_parser(self):
 		# Top level parser, to break up block level items
-		p = RuleParser(
+		p = RegexParser(
 			Rule(VERBATIM_BLOCK, r'''
 				^(?P<pre_indent>\t*) \'\'\' \s*?				# 3 "'"
 				( (?:^.*\n)*? )									# multi-line text
@@ -284,7 +181,7 @@ class WikiParser(object):
 				process=self.parse_object
 			),
 			Rule(HEADING,
-				r'^( ==+ [\ \t]+ \S.*? ) [\ \t]* =* \n',		# "==== heading ===="
+				r'^( ==+ [\ \t]+ \S.*? ) [\ \t]* =* $\n?',		# "==== heading ===="
 				process=self.parse_heading
 			),
 			# standard table format
@@ -296,7 +193,7 @@ class WikiParser(object):
 				process=self.parse_table
 			),
 			# line format
-			Rule(LINE, r'(?<=\n)-{5,}(?=\n)', process=self.parse_line) # \n----\n
+			Rule(LINE, r'(?<=\n)-{5,}\n', process=self.parse_line) # \n----\n
 
 		)
 		p.process_unmatched = self.parse_para
@@ -320,7 +217,6 @@ class WikiParser(object):
 		self.inline_parser(builder, text)
 		builder.end(HEADING)
 
-
 	@staticmethod
 	def parse_pre(builder, indent, text):
 		'''Verbatim block with indenting'''
@@ -341,7 +237,7 @@ class WikiParser(object):
 			# Special case to ensure backward compatibility for versions where
 			# tables could be stored as objects
 			if param.strip() != '':
-				logger.warn('Table object had unexpected parameters: %s', param.strip())
+				logger.warning('Table object had unexpected parameters: %s', param.strip())
 			lines = body.splitlines(True)
 			headerrow = lines[0]
 			alignstyle = lines[1]
@@ -481,69 +377,73 @@ class WikiParser(object):
 		'''
 		if indent:
 			text = _remove_indent(text, indent)
-			attrib = {'indent': len(indent)}
+			indent = len(indent)
 		else:
 			attrib = None
 
 		lines = text.splitlines(True)
-		self.parse_list_lines(builder, lines, 0, attrib)
+		self.parse_list_lines(builder, lines, indent)
 
-	def parse_list_lines(self, builder, lines, level, attrib=None):
-		listtype = None
-		first = True
-		while lines:
-			line = lines[0]
+	def parse_list_lines(self, builder, lines, list_indent=None):
+		stack = [(None, -1)] # list type, indent
+
+		def start_list(number_m):
+			attrib = {'indent': list_indent} if (list_indent and len(stack) == 1) else None
+			if number_m:
+				l = NUMBEREDLIST
+				attrib = attrib or {}
+				attrib['start'] = number_m.group(1)
+			else:
+				l = BULLETLIST
+			builder.start(l, attrib)
+			stack.append((l, my_indent))
+
+		for line in lines:
 			m = bullet_line_re.match(line)
 			assert m, 'Line does not match a list item: >>%s<<' % line
 			prefix, bullet, text = m.groups()
+			my_indent = len(prefix)
 			bullet = bullet.rstrip()
+			number_m = number_bullet_re.match(bullet)
 
-			if first:
-				number = check_number_bullet(bullet)
-				if number:
-					listtype = NUMBEREDLIST
-					if not attrib:
-						attrib = {}
-					attrib['start'] = number
-				else:
-					listtype = BULLETLIST
-				builder.start(listtype, attrib)
-				first = False
-
-			mylevel = len(prefix)
-			if mylevel > level:
-				self.parse_list_lines(builder, lines, level + 1) # recurs
-			elif mylevel < level:
-				builder.end(listtype)
-				return
+			if my_indent > stack[-1][-1]:
+				start_list(number_m)
+			elif my_indent <= stack[-2][-1]:
+				# Check parent of current level my_indent could be lower than
+				# current level but still on same hierarchy level due to
+				# inconsistent formatting
+				while my_indent <= stack[-2][-1]:
+					l, i = stack.pop()
+					builder.end(l)
+			elif (stack[-1][0] == NUMBEREDLIST and bullet in self.BULLETS) \
+				or (stack[-1][0] == BULLETLIST and number_m):
+					# inconsistent list, break current level and start new list
+					l, x = stack.pop()
+					builder.end(l)
+					start_list(number_m)
 			else:
-				if listtype == NUMBEREDLIST:
-					if bullet in self.BULLETS:
-						builder.end(listtype)
-						return self.parse_list_lines(builder, lines, level) # recurs
-					else:
-						attrib = None
-				else: # BULLETLIST
-					if bullet in self.BULLETS:
-						attrib = {'bullet': self.BULLETS[bullet]}
-					elif number_bullet_re.match(bullet):
-						builder.end(listtype)
-						return self.parse_list_lines(builder, lines, level) # recurs
-					else:
-						attrib = {'bullet': BULLET}
-				builder.start(LISTITEM, attrib)
+				pass # we are at right level
+
+			if stack[-1][0] == NUMBEREDLIST:
+				attrib = None
+			else: # BULLETLIST
+				attrib = {'bullet': self.BULLETS.get(bullet, BULLET)}
+
+			builder.start(LISTITEM, attrib)
+			if text: # Might be empty line apart from bullet - even no newline at end of buffer
 				self.inline_parser(builder, text)
-				builder.end(LISTITEM)
+			builder.end(LISTITEM)
 
-				lines.pop(0)
-
-		builder.end(listtype)
+		while len(stack) > 1:
+			l, x = stack.pop()
+			builder.end(l)
 
 	def parse_indent(self, builder, text, indent):
 		'''Parse indented blocks and turn them into 'div' elements'''
 		text = _remove_indent(text, indent)
 		builder.start(BLOCK, {'indent': len(indent)})
-		self.inline_parser(builder, text)
+		if text: # Might be empty line apart from indent characters - even no newline at end of buffer
+			self.inline_parser(builder, text)
 		builder.end(BLOCK)
 
 	def parse_link(self, builder, text):
@@ -592,7 +492,7 @@ class WikiParser(object):
 		if self.backward_url_parsing:
 			builder.append(LINK, {'href': text}, text)
 		else:
-			url = match_url(text)
+			url = match_url_link(text)
 			if url is None:
 				self.inline_parser.backup_parser_offset(len(text) - 1)
 				builder.text(text[0]) # FIXME Ideally should allow re-parsing first character
@@ -607,9 +507,12 @@ class WikiParser(object):
 		builder.append(TAG, {'name': text[1:]}, text)
 
 	@staticmethod
+	def parse_anchor(builder, name, *a):
+		builder.append(ANCHOR, {'name': name}, name)
+
+	@staticmethod
 	def parse_line(builder, text):
 		builder.append(LINE)
-
 
 
 wikiparser = WikiParser() #: singleton instance
@@ -621,12 +524,12 @@ class Parser(ParserClass):
 	def __init__(self, version=WIKI_FORMAT_VERSION):
 		self.version = version
 
-	def parse(self, input, partial=False, file_input=False):
+	def parse(self, input, file_input=False):
 		if not isinstance(input, str):
 			input = ''.join(input)
 
-		if not partial:
-			input = fix_line_end(input)
+		input = input.replace('\u2029', ' ') # Unicode PARAGRAPH SEPARATOR, causes conflict between "splitlines()" and regex "\n" matching - see issues #1760
+		input = fix_unicode_whitespace(input)
 
 		meta, version = None, False
 		if file_input:
@@ -642,7 +545,7 @@ class Parser(ParserClass):
 		else:
 			mywikiparser = WikiParser(backward_indented_blocks=True, backward_url_parsing=True)
 
-		builder = ParseTreeBuilder(partial=partial)
+		builder = ParseTreeBuilder()
 		mywikiparser(builder, input)
 
 		parsetree = builder.get_parsetree()
@@ -665,6 +568,7 @@ class Dumper(TextDumper):
 		XCHECKED_BOX: '[x]',
 		CHECKED_BOX: '[*]',
 		MIGRATED_BOX: '[>]',
+		TRANSMIGRATED_BOX: '[<]',
 		BULLET: '*',
 	}
 
@@ -687,14 +591,18 @@ class Dumper(TextDumper):
 				('Content-Type', 'text/x-zim-wiki'),
 				('Wiki-Format', WIKI_FORMAT_VERSION),
 			)
-			return [dump_header_lines(header, getattr(tree, 'meta', {})), '\n'] \
-						+ TextDumper.dump(self, tree)
+			body = TextDumper.dump(self, tree)
+			if not body[-1].endswith('\n'):
+				body[-1] = body[-1] + '\n'
+			return [dump_header_lines(header, getattr(tree, 'meta', {})), '\n'] + body
 		else:
 			return TextDumper.dump(self, tree)
 
 	def dump_pre(self, tag, attrib, strings):
 		# Indent and wrap with "'''" lines
 		strings.insert(0, "'''\n")
+		if strings and not strings[-1].endswith('\n'):
+			strings[-1] = strings[-1] + '\n'
 		strings.append("'''\n")
 		strings = self.dump_indent(tag, attrib, strings)
 		return strings
@@ -708,8 +616,12 @@ class Dumper(TextDumper):
 			level = 5
 		tag = '=' * (7 - level)
 		strings.insert(0, tag + ' ')
-		strings.append(' ' + tag)
+		text = strings.pop()
+		strings.append(text.rstrip() + ' ' + tag + '\n') # includes stripping "\n"
 		return strings
+
+	def dump_anchor(self, tag, attrib, strings=None):
+		return ("{{id: ", attrib['name'], "}}")
 
 	def dump_link(self, tag, attrib, strings=None):
 		assert 'href' in attrib, \
@@ -717,7 +629,7 @@ class Dumper(TextDumper):
 		href = attrib['href']
 
 		if not strings or href == ''.join(strings):
-			if is_url(href):
+			if is_url_link(href):
 				return (href,) # no markup needed
 			else:
 				return ('[[', href, ']]')
@@ -739,9 +651,9 @@ class Dumper(TextDumper):
 			src += '?%s' % '&'.join(opts)
 
 		if alt:
-			return ('{{', src, '|', alt, '}}')
+			return ['{{', src, '|', alt, '}}']
 		else:
-			return('{{', src, '}}')
+			return ['{{', src, '}}']
 
 		# TODO use text for caption (with full recursion)
 
@@ -750,7 +662,7 @@ class Dumper(TextDumper):
 
 		opts = []
 		for key, value in sorted(list(attrib.items())):
-			# TODO: sorted to make order predictable for testing - prefer use of OrderedDict
+			# TODO: sorted to make order predictable for testing - prefer use of DefinitionOrderedDict
 			if key in ('type', 'indent') or value is None:
 				continue
 			# double quotes are escaped by doubling them

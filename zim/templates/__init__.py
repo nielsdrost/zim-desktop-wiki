@@ -50,9 +50,11 @@ import logging
 
 logger = logging.getLogger('zim.templates')
 
-from zim.fs import File, Dir, PathLookupError
+from zim.fs import adapt_from_oldfs
+from zim.newfs import FileNotFoundError, localFileOrFolder, File
+from zim.errors import Error
 from zim.config import data_dirs
-from zim.parsing import is_path_re
+from zim.parse.links import is_path_re
 from zim.signals import SignalEmitter
 
 
@@ -64,13 +66,10 @@ from zim.templates.functions import build_template_functions
 
 def list_template_categories():
 	'''Returns a list of categories (sub folders)'''
-	dirs = data_dirs('templates')
 	categories = set()
-	for dir in dirs:
-		for name in dir.list():
-			## TODO list_objects would help here + a filter like type=Dir
-			if dir.subdir(name).isdir():
-				categories.add(name)
+	for dir in data_dirs('templates'):
+		for my_dir in dir.list_folders():
+			categories.add(my_dir.basename)
 
 	return sorted(categories)
 
@@ -83,51 +82,63 @@ def list_templates(category):
 	'''
 	category = category.lower()
 	templates = set()
-	path = list(data_dirs(('templates', category)))
-	path.reverse()
-	for dir in path:
-		for basename in dir.list():
-			if dir.file(basename).exists(): # is a file
-				name = basename.rsplit('.', 1)[0] # robust if no '.' in basename
-				templates.add((name, basename))
+	folders = list(data_dirs(('templates', category)))
+	folders.reverse()
+	for dir in folders:
+		for file in dir.list_files():
+			name = file.basename.rsplit('.', 1)[0] # robust if no '.' in basename
+			templates.add((name, file.basename))
 	return sorted(templates)
 
 
-def get_template(category, template):
+def get_template(category, template, pwd=None):
 	'''Returns a Template object for a template name or file path
+	Intended to precess a "template" option e.g. for the exporter and the www
+	server objects. Therefore also passes through L{Template} objects to allow
+	using those objects directly with existing L{Template} object as well.
+
 	@param category: the template category (e.g. "html"). Use to resolve
 	the template if a template name is given
-	@param template: the template name or file path
+	@param template: the template name, file path, L{File} object or L{Template} object
+	@param pwd: working directory as a string, or C{None}. Used to resolve relative file
+	paths. Should typically only be used when processing commandline arguments
+	@returns: a L{Template} object
+	@raises: ValueError if C{template} is another type
+	@raises: FileNotFoundError if C{template} could not be resolved
 	'''
-	assert isinstance(template, str)
+	template = adapt_from_oldfs(template)
+	if category == 'mhtml': # HACK: special case for mhtml, how to make configurable from format?
+		category = 'html'
 
-	if is_path_re.match(template):
-		file = File(template)
+	if isinstance(template, Template):
+		return template # pass through, so users always accept Template object
+	elif isinstance(template, File):
+		file = template
+	elif isinstance(template, str):
+		file = _get_template_for_string(category, template, pwd)
 	else:
-		file = None
+		raise ValueError("Cannot use %r as template" % template)
+
+	if not file.exists():
+		raise FileNotFoundError(file)
+
+	logger.info('Loading template from: %s', file)
+	return Template(file)
+
+
+def _get_template_for_string(category, template, pwd):
+	if is_path_re.match(template): # e.g. starts with "./"
+		return localFileOrFolder(template, pwd)
+	else:
 		for dir in data_dirs(('templates', category)):
-			for basename in dir.list():
+			for basename in dir.list_names():
 				name = basename.rsplit('.')[0] # robust if no '.' in basename
 				if basename == template or name == template:
 					file = dir.file(basename)
 					if file.exists(): # is a file
-						break
-			if file and file.exists():
-				break
+						return file
 		else:
-			file = File(template)
-			if not file.exists():
-				raise PathLookupError(_('Could not find template "%s"') % template)
-					# T: Error message in template lookup
-
-	if not file.exists():
-		raise PathLookupError(_('No such file: %s') % file)
-			# T: Error message in template lookup
-
-	logger.info('Loading template from: %s', file)
-	#~ basename, ext = file.basename.rsplit('.', 1)
-	#~ resources = file.dir.subdir(basename)
-	return Template(file)
+			return localFileOrFolder(template, pwd)
 
 
 class Template(SignalEmitter):
@@ -153,6 +164,7 @@ class Template(SignalEmitter):
 		'''Constructor
 		@param file: a L{File} object for the template file
 		'''
+		file = adapt_from_oldfs(file)
 		self.filename = file.path
 		try:
 			self.parts = TemplateParser().parse(file.read())
@@ -163,9 +175,11 @@ class Template(SignalEmitter):
 		self.resources_dir = None
 		if '.' in file.basename:
 			name, ext = file.basename.rsplit('.')
-			rdir = file.dir.subdir(name)
+			rdir = file.parent().folder(name)
 			if rdir.exists():
 				self.resources_dir = rdir
+
+		self._resources_cache = {}
 
 	def process(self, output, context):
 		'''Evaluate the template
@@ -181,5 +195,22 @@ class Template(SignalEmitter):
 		self.emit('process', output, context)
 
 	def do_process(self, output, context):
-		processor = TemplateProcessor(self.parts)
+		if self.resources_dir:
+			processor = TemplateProcessor(self.parts, self.parse_included_file)
+		else:
+			processor = TemplateProcessor(self.parts)
 		processor.process(output, context)
+
+	def parse_included_file(self, path):
+		if path not in self._resources_cache:
+			file = self.resources_dir.file(path)
+			if not file.exists():
+				raise FileNotFoundError(file)
+
+			try:
+				self._resources_cache[path] = TemplateParser().parse(file.read())
+			except Exception as error:
+				error.parser_file = file
+				raise
+
+		return self._resources_cache[path]

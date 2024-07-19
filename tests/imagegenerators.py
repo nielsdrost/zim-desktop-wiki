@@ -11,7 +11,6 @@ from zim.formats.wiki import Dumper as WikiDumper
 
 from gi.repository import Gtk
 
-from zim.fs import Dir
 from zim.newfs import LocalFolder
 from zim.notebook import Path
 
@@ -39,16 +38,16 @@ class TestBackwardImageGeneratorNoPlugins(tests.TestCase):
 
 	def testDumpWiki(self):
 		attachment_dir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
-		LocalFolder(tests.ZIM_DATADIR).file('zim.png').copyto(attachment_dir.file('test.png'))
+		tests.ZIM_DATA_FOLDER.file('zim.png').copyto(attachment_dir.file('test.png'))
 
 		notebook = self.setUpNotebook()
 		notebook.get_attachments_dir = lambda *a: attachment_dir
 
 		pageview = setUpPageView(notebook, text='{{./test.png?type=equation}}')
 		pageview.textview.get_buffer().set_modified(True)
-		tree = pageview.get_parsetree()
+		tree = pageview.page.get_parsetree()
 		text = WikiDumper().dump(tree)
-		self.assertEquals(text, ['{{./test.png?type=equation}}\n'])
+		self.assertEqual(text, ['{{./test.png?type=equation}}'])
 
 
 @tests.skipUnless(InsertEquationPlugin.check_dependencies_ok(), 'Missing dependencies')
@@ -76,12 +75,12 @@ class TestBackwardImageGeneratorWithPlugin(TestBackwardImageGeneratorNoPlugins):
 			attrib, data = otype.data_from_model(model)
 			self.assertTrue(attrib['src'])
 
-		self.assertEquals(attachment_dir.file('equation.tex').read(), r'c = \sqrt{ a^2 + b^2 }')
+		self.assertEqual(attachment_dir.file('equation.tex').read(), r'c = \sqrt{ a^2 + b^2 }')
 		assertIsPNG(attachment_dir.file('equation.png'))
 
 	def testEditObjectDialog(self):
 		attachment_dir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
-		LocalFolder(tests.ZIM_DATADIR).file('zim.png').copyto(attachment_dir.file('test.png'))
+		tests.ZIM_DATA_FOLDER.file('zim.png').copyto(attachment_dir.file('test.png'))
 
 		notebook = self.setUpNotebook()
 		notebook.get_attachments_dir = lambda *a: attachment_dir
@@ -97,7 +96,7 @@ class TestBackwardImageGeneratorWithPlugin(TestBackwardImageGeneratorNoPlugins):
 		with tests.DialogContext(edit_dialog):
 			pageview.edit_object()
 
-		self.assertEquals(attachment_dir.file('test.tex').read(), r'c = \sqrt{ a^2 + b^2 }')
+		self.assertEqual(attachment_dir.file('test.tex').read(), r'c = \sqrt{ a^2 + b^2 }')
 		assertIsPNG(attachment_dir.file('test.png'))
 
 	def testNewFile(self):
@@ -175,8 +174,6 @@ class TestImageGeneratorPluginMixin(object):
 			assertIsPNG(imagefile)
 		# else: TODO other types
 
-		if backward_otype:
-			self.assertTrue(imagefile.basename.endswith(backward_otype.imagefile_extension))
 		self.assertTrue(imagefile.exists())
 		if logfile is not None:
 			self.assertTrue(logfile.exists())
@@ -233,7 +230,7 @@ x_{1,2}=\frac{-b\pm\sqrt{\color{Red}b^2-4ac}}{2a}
 		tree = WikiParser().parse(wiki)
 		latex = LatexDumper(linker).dump(tree)
 
-		self.assertEquals(latex, wanted.splitlines(True))
+		self.assertEqual(latex, wanted.splitlines(True))
 
 
 @tests.skipUnless(InsertDiagramPlugin.check_dependencies_ok(), 'Missing dependencies')

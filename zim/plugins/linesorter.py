@@ -9,7 +9,7 @@ from gi.repository import Gtk
 from zim.errors import Error
 from zim.plugins import PluginClass
 from zim.actions import action
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 
 from zim.gui.pageview import PageViewExtension
 from zim.gui.widgets import MessageDialog
@@ -27,7 +27,8 @@ class LineSorterPlugin(PluginClass):
 		'description': _('''\
 This plugin sorts selected lines in alphabetical order.
 If the list is already sorted the order will be reversed
-(A-Z to Z-A).
+(A-Z to Z-A). Additional features: move text lines up or down,
+duplicate or remove lines of text.
 '''), # T: plugin description
 		'author': 'NorfCran',
 		'help': 'Plugins:Line Sorter',
@@ -108,7 +109,9 @@ class LineSorterPageViewExtension(PageViewExtension):
 
 
 	def move_line(self, offset):
-		'''Move line at the current cursor position #offset lines down (up if offset is negative) '''
+		'''Move line at the current cursor position up or Down
+		@param offset: number of lines to move down, or up if value is negative
+		'''
 		buffer = self.pageview.textview.get_buffer()
 		start, end = self._get_iters_one_or_more_lines(buffer)
 
@@ -140,8 +143,22 @@ class LineSorterPageViewExtension(PageViewExtension):
 			else:
 				iter.backward_lines(abs(offset))
 			buffer.place_cursor(iter)
+
+			# Fixup line end if we move down towards end of buffer without
+			# newline at end of buffer
+			if not iter.starts_line():
+				buffer.insert_at_cursor('\n')
+				iter = buffer.get_insert_iter()
+
+			# actual insert
 			insert_line = iter.get_line()
 			buffer.insert_parsetree_at_cursor(tree)
+
+			# Fixup line end if selection happened to be end of buffer without newline
+			# and moving up
+			iter = buffer.get_insert_iter()
+			if not iter.starts_line():
+				buffer.insert_at_cursor('\n')
 
 			# redo selection/place cursor at same position
 			if has_selection:
@@ -151,6 +168,8 @@ class LineSorterPageViewExtension(PageViewExtension):
 			else:
 				iter = buffer.get_iter_at_line_offset(insert_line, cursor_offset)
 				buffer.place_cursor(iter)
+
+			self.pageview.scroll_cursor_on_screen()
 
 
 	@action(_('_Move Line Up'), accelerator='<Primary>Up', menuhints='edit')  # T: Menu item

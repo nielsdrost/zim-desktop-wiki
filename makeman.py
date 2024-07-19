@@ -18,10 +18,15 @@ def get_about():
 	readme = open('README.md')
 	lines = []
 	for line in readme:
-		if line.startswith('## '):
+		if line.startswith('# '):
+			lines.append(line[2:]) # add first header
+		elif line.startswith('## '):
 			break # next header
 		elif line.startswith('====') or line.startswith('!['):
 			pass # skip images and header underline
+		elif line.startswith('* '):
+			lines.append('.IP \\[bu]\n')
+			lines.append(line[2:]) # add list element
 		else:
 			lines.append(line)
 

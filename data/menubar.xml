@@ -39,12 +39,15 @@
 				<menuitem action='toggle_checkbox'/>
 				<menuitem action='xtoggle_checkbox'/>
 				<menuitem action='migrate_checkbox'/>
+				<menuitem action='transmigrate_checkbox'/>
 			</menu>
 			<menuitem action='edit_object'/>
 			<menuitem action='remove_link'/>
 			<separator/>
 			<placeholder name='plugin_items'/>
 			<separator/>
+			<menuitem action='copy_current_line'/>
+			<menuitem action='cut_current_line'/>
 			<menuitem action='copy_location'/>
 			<separator/>
 			<menuitem action='show_templateeditor'/>
@@ -52,19 +55,8 @@
 		</menu>
 		<menu action='view_menu'>
 			<menuitem action='toggle_editable'/>
-			<menuitem action='toggle_toolbar'/>
-			<menuitem action='toggle_statusbar'/>
 			<menuitem action='toggle_panes'/>
 			<menuitem action='show_all_panes'/>
-			<menu action='toolbar_menu'>
-				<menuitem action='set_toolbar_style_icons_and_text'/>
-				<menuitem action='set_toolbar_style_icons_only'/>
-				<menuitem action='set_toolbar_style_text_only'/>
-				<separator/>
-				<menuitem action='set_toolbar_icon_size_large'/>
-				<menuitem action='set_toolbar_icon_size_small'/>
-				<menuitem action='set_toolbar_icon_size_tiny'/>
-			</menu>
 			<menuitem action='toggle_fullscreen'/>
 			<separator/>
 			<placeholder name='plugin_items'/>
@@ -101,9 +93,13 @@
 			<menuitem action='apply_format_h4'/>
 			<menuitem action='apply_format_h5'/>
 			<separator/>
+			<menuitem action='clear_heading_format'/>
+			<separator/>
 			<menuitem action='apply_format_bullet_list'/>
 			<menuitem action='apply_format_numbered_list'/>
 			<menuitem action='apply_format_checkbox_list'/>
+			<separator/>
+			<menuitem action='clear_list_format'/>
 			<separator/>
 			<menuitem action='apply_format_strong'/>
 			<menuitem action='apply_format_emphasis'/>
@@ -127,6 +123,7 @@
 		</menu>
 		<menu action='tools_menu'>
 			<menuitem action='show_word_count'/>
+			<menuitem action='move_text'/>
 			<placeholder name='page_tools'/>
 			<separator/>
 			<menuitem action='open_attachments_folder'/>
@@ -142,7 +139,7 @@
 			<menuitem action='open_document_folder'/>
 -->
 			<separator/>
-			<menuitem action='reload_index'/>
+			<menuitem action='check_and_update_index'/>
 			<placeholder name='plugin_items'/>
 			<separator/>
 			<menuitem action='edit_page_source'/>
@@ -174,36 +171,6 @@
 			<menuitem action='show_about'/>
 		</menu>
 	</menubar>
-	<toolbar name='toolbar'>
-		<toolitem action='toggle_panes'/>
-		<separator/>
-		<toolitem action='open_page_home'/>
-		<toolitem action='open_page_back'/>
-		<toolitem action='open_page_forward'/>
-		<separator/>
-		<toolitem action='toggle_editable'/>
-		<separator/>
-		<toolitem action='toggle_format_strong'/>
-		<toolitem action='toggle_format_emphasis'/>
-		<toolitem action='toggle_format_mark'/>
-		<toolitem action='toggle_format_strike'/>
-		<separator/>
-		<toolitem action='insert_link'/>
-		<toolitem action='attach_file'/>
-		<placeholder name='insert_plugin_items'/>
-		<separator/>
-		<separator/>
-		<placeholder name='view_plugin_items'/>
-	</toolbar>
-	<popup name='toolbar_popup'>
-		<menuitem action='set_toolbar_style_icons_and_text'/>
-		<menuitem action='set_toolbar_style_icons_only'/>
-		<menuitem action='set_toolbar_style_text_only'/>
-		<separator/>
-		<menuitem action='set_toolbar_icon_size_large'/>
-		<menuitem action='set_toolbar_icon_size_small'/>
-		<menuitem action='set_toolbar_icon_size_tiny'/>
-	</popup>
 	<popup name='page_edit_popup'>
 		<menuitem action='new_page_here'/>
 		<menuitem action='new_sub_page'/>
@@ -241,4 +208,5 @@
 	<accelerator action='find_next_alt1'/>
 	<accelerator action='find_previous_alt1'/>
 	<accelerator action='redo_alt1'/>
+	<accelerator action='focus_sidepane_key_toggle'/>
 </ui>

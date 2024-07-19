@@ -18,19 +18,19 @@ import os
 import re
 import sys
 import shutil
-import tempfile
 import errno
 import logging
 
 
+
 from zim.errors import Error
-from zim.parsing import url_encode, url_decode, URL_ENCODE_READABLE
+from zim.parse.encode import url_decode, url_encode
 from zim.signals import SignalEmitter, SIGNAL_AFTER
 
 logger = logging.getLogger('zim.fs')
 
 
-from zim.newfs.base import _os_expanduser, SEP
+from zim.newfs.base import _os_expanduser, SEP, FileNotFoundError
 from zim.newfs.local import AtomicWriteContext
 from zim.newfs.local import get_tmpdir as _newfs_get_tmpdir
 
@@ -41,6 +41,17 @@ def adapt_from_newfs(file):
 		return File(file.path)
 	elif isinstance(file, LocalFolder):
 		return Dir(file.path)
+	else:
+		return file
+
+
+def adapt_from_oldfs(file):
+	from zim.newfs import LocalFile, LocalFolder
+
+	if isinstance(file, File):
+		return LocalFile(file.path)
+	elif isinstance(file, Dir):
+		return LocalFolder(file.path)
 	else:
 		return file
 
@@ -103,6 +114,8 @@ IMAGE_EXTENSIONS = (
 	'svg', # image/svg+xml
 	'svgz', # image/svg+xml
 	'svg.gz', # image/svg+xml
+	# Custom additions
+	'webp', # image/webp
 )
 
 
@@ -152,7 +165,7 @@ def normalize_file_uris(path):
 
 
 def normalize_win32_share(path):
-	'''Translates paths for windows shares in the platform specific
+	r'''Translates paths for windows shares in the platform specific
 	form. So on windows it translates C{smb://} URLs to C{\\host\share}
 	form, and vice versa on all other platforms.
 	Just returns the original path if it was already in the right form,
@@ -251,19 +264,6 @@ class FileWriteError(Error):
 	pass # TODO description
 
 
-class FileNotFoundError(PathLookupError):
-	'''Error raised when a file does not exist that is expected to
-	exist.
-
-	@todo: reconcile this class with the NoSuchFileError in zim.gui
-	'''
-
-	def __init__(self, file):
-		self.file = file
-		self.msg = _('No such file: %s') % file.path
-			# T: message for FileNotFoundError
-
-
 class FileUnicodeError(Error):
 	'''Error raised when there is an issue decoding the file contents.
 	Typically due to different encoding where UTF-8 is expected.
@@ -332,6 +332,8 @@ class UnixPath(object):
 		element is allowed to be an absolute path, URL or L{FilePath}
 		object as well.
 		'''
+		logger.warning('Using deprecated class "zim.fs.%s" - please update your code to use the "zim.newfs" module instead' % self.__class__.__name__)
+
 		self._serialized = None
 
 		if isinstance(path, FilePath):
@@ -1236,7 +1238,7 @@ class File(FilePath):
 					raise
 
 			if not self._mtime == mtime:
-				logger.warn('mtime check failed for %s, trying md5', self.path)
+				logger.warning('mtime check failed for %s, trying md5', self.path)
 				if self._md5 != _md5(self._read()):
 					raise FileWriteError(_('File changed on disk: %s') % self.path)
 						# T: error message

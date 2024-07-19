@@ -49,16 +49,19 @@ class InsertedObjectWidget(Gtk.EventBox):
 
 	expand = True
 
-	def __init__(self):
+	def __init__(self, widget_style=None):
 		GObject.GObject.__init__(self)
-		self.set_border_width(3)
 		self._has_cursor = False
 		self._vbox = Gtk.VBox()
 		Gtk.EventBox.add(self, self._vbox)
-		widget_set_css(self._vbox, 'zim-inserted-object', 'border: 1px solid #ccc')
-			# Choosen #ccc because it should give contract with both light and
-			# dark theme, but less than the text color itself
-			# Can be overruled in user css is really conflicts with theme
+		if widget_style == 'inline':
+			self._vbox.set_name('zim-inserted-object-inline')
+		else:
+			self.set_border_width(3)
+			widget_set_css(self._vbox, 'zim-inserted-object', 'border: 1px solid #ccc')
+				# Choosen #ccc because it should give contract with both light and
+				# dark theme, but less than the text color itself
+				# Can be overruled in user css is really conflicts with theme
 
 	def add(self, widget):
 		'''Add a widget to the object'''
@@ -211,13 +214,13 @@ class ImageFileWidget(InsertedObjectWidget):
 
 	expand = False
 
-	def __init__(self, file):
-		InsertedObjectWidget.__init__(self)
+	def __init__(self, file, widget_style=None):
+		InsertedObjectWidget.__init__(self, widget_style=widget_style)
 		self.file = file
 		if file.exists():
 			self.image = Gtk.Image.new_from_file(file.path)
 		else:
-			self.image = Gtk.Image()
+			self.image = Gtk.Image.new_from_stock(Gtk.STOCK_MISSING_IMAGE, Gtk.IconSize.DIALOG)
 		self.image.set_property('margin', 1) # seperate line and content
 		self.add(self.image)
 
@@ -228,10 +231,10 @@ class ImageFileWidget(InsertedObjectWidget):
 
 	def set_file(self, file):
 		self.file = file
-		if self.file.exists():
+		if self.file is not None and self.file.exists():
 			self.image.set_from_file(file.path)
 		else:
-			self.image.clear()
+			self.image.set_from_stock(Gtk.STOCK_MISSING_IMAGE, Gtk.IconSize.DIALOG)
 
 
 def _find_plugin(name):
@@ -346,6 +349,8 @@ class UnknownInsertedImageObject(InsertedObjectType):
 
 	name = "unknown-image"
 
+	is_inline = True # Behave like an image
+
 	label = _('Unkown Image type')  # T: label for inserted object
 
 	def parse_attrib(self, attrib):
@@ -404,12 +409,9 @@ class InsertedObjectUI(object):
 
 	def get_ui_xml(self):
 		menulines = []
-		toollines = []
 		for obj in self.insertedobjects.values():
 			name = 'insert_' + obj.name
 			menulines.append("<menuitem action='%s'/>\n" % name)
-			if obj.verb_icon is not None:
-				toollines.append("<toolitem action='%s'/>\n" % name)
 		return """\
 		<ui>
 			<menubar name='menubar'>
@@ -419,15 +421,9 @@ class InsertedObjectUI(object):
 					</placeholder>
 				</menu>
 			</menubar>
-			<toolbar name='toolbar'>
-				<placeholder name='insert_plugin_items'>
-				%s
-				</placeholder>
-			</toolbar>
 		</ui>
 		""" % (
 			''.join(menulines),
-			''.join(toollines),
 		)
 
 	def _action_handler(self, action):

@@ -17,14 +17,14 @@ from zim.notebook.index.base import TreeModelMixinBase
 from zim.notebook.index.pages import PagesTreeModelMixin, PageIndexRecord, IndexNotFoundError, IS_PAGE
 
 from zim.plugins import PluginClass
-from zim.actions import PRIMARY_MODIFIER_MASK
+from zim.actions import PRIMARY_MODIFIER_MASK, action
 
-from zim.gui.pageview import PageViewExtension
+from zim.gui.notebookview import NotebookViewExtension
 from zim.gui.widgets import BrowserTreeView, ScrolledWindow, \
 	encode_markup_text, ErrorDialog, \
 	WindowSidePaneWidget, LEFT_PANE, PANE_POSITIONS
-from zim.gui.clipboard import Clipboard, pack_urilist, unpack_urilist, \
-	INTERNAL_PAGELIST_TARGET_NAME, INTERNAL_PAGELIST_TARGET
+from zim.gui.clipboard import Clipboard, unpack_urilist, PageLinkData, \
+	PAGELIST_TARGET_NAME, PAGELIST_TARGET_ID, PAGELIST_TARGET
 from zim.gui.uiactions import UIActions, PAGE_EDIT_ACTIONS, PAGE_ROOT_ACTIONS
 
 import zim.gui.clipboard
@@ -60,23 +60,28 @@ This plugin adds the page index pane to the main window.
 		# key, type, label, default
 		('pane', 'choice', _('Position in the window'), LEFT_PANE, PANE_POSITIONS),
 			# T: preferences option
+		('use_drag_and_drop', 'bool', _('Use drag&drop to move pages in the notebook'), False),
+			# T: preferences option
 		('autoexpand', 'bool', _('Automatically expand sections on open page'), True),
 			# T: preferences option
 		('autocollapse', 'bool', _('Automatically collapse sections on close page'), True),
 			# T: preferences option
+		('use_hscroll', 'bool', _('Use horizontal scrollbar (may need restart)'), False),
+			# T: preferences option
+		('use_tooltip', 'bool', _('Use tooltips'), True),
+			# T: preferences option
 	)
 
 
-class PageIndexPageViewExtension(PageViewExtension):
+class PageIndexNotebookViewExtension(NotebookViewExtension):
 
 	def __init__(self, plugin, pageview):
-		PageViewExtension.__init__(self, plugin, pageview)
+		NotebookViewExtension.__init__(self, plugin, pageview)
 		index = pageview.notebook.index
 		model = PageTreeStore(index)
 		self.treeview = PageTreeView(pageview.notebook, self.navigation)
 		self.treeview.set_model(model)
 		self.widget = PageIndexWidget(self.treeview)
-		self._autoexpanded = None
 
 		# Connect to ui signals
 		#window.connect('start-index-update', lambda o: self.disconnect_model())
@@ -90,23 +95,18 @@ class PageIndexPageViewExtension(PageViewExtension):
 		# self.pageindex.treeview.connect('insert-link',
 		# 	lambda v, p: self.pageview.insert_links([p]))
 
+		self.on_preferences_changed(self.plugin.preferences)
+		self.plugin.preferences.connect('changed', self.on_preferences_changed)
+
+	def on_preferences_changed(self, preferences):
+		self.treeview.set_use_drag_and_drop(preferences['use_drag_and_drop'])
+		self.treeview.set_use_tooltip(preferences['use_tooltip'])
+		self.treeview.set_use_ellipsize(not preferences['use_hscroll'])
+			# To use horizontal scrolling, turn off ellipsize
+		self.treeview.set_autoexpand(preferences['autoexpand'], preferences['autocollapse'])
+
 	def on_page_changed(self, pageview, page):
 		treepath = self.treeview.set_current_page(page, vivificate=True)
-
-		if self._autoexpanded and self.plugin.preferences['autocollapse']:
-			ref1, ref2 = self._autoexpanded
-			if ref1.valid() and (ref2 is None or ref2.valid()):
-				prev_treepath = ref1.get_path()
-				prev_expanded_path = ref2.get_path() if ref2 else None
-				self.treeview.restore_expanded_path(prev_treepath, prev_expanded_path)
-
-		if treepath and self.plugin.preferences['autoexpand']:
-			expanded_path = self.treeview.get_expanded_path(treepath)
-			model = self.treeview.get_model()
-			ref1 = Gtk.TreeRowReference(model, treepath)
-			ref2 = Gtk.TreeRowReference(model, expanded_path) if expanded_path else None
-			self._autoexpanded = (ref1, ref2)
-			self.treeview.select_treepath(treepath)
 
 	def disconnect_model(self):
 		'''Stop the widget from listening to the index. Used e.g. to
@@ -126,10 +126,25 @@ class PageIndexPageViewExtension(PageViewExtension):
 		model = PageTreeStore(self.pageview.notebook.index)
 		self.treeview.set_model(model)
 
+	@action(_('Collapse Page Index'), accelerator=None, menuhints='view') # T: menu item
+	def collapse(self):
+		self.treeview.collapse_all()
+
+	@action(_('Reveal Current Page in Page Index'), accelerator=None, menuhints='view') # T: menu item
+	def reveal(self):
+		model = self.treeview.get_model()
+		try:
+			treepaths = model.find_all(model.current_page)
+		except IndexNotFoundError:
+			return
+		else:
+			if len(treepaths) != 0:
+				self.treeview.select_treepath(treepaths[0])
+
 
 class PageIndexWidget(Gtk.VBox, WindowSidePaneWidget):
 
-	title = _('Index')	# T: tab label for side pane
+	title = _('Inde_x')	# T: tab label for side pane
 
 	def __init__(self, treeview):
 		GObject.GObject.__init__(self)
@@ -367,7 +382,7 @@ class PageTreeView(BrowserTreeView):
 	@signal: C{page-activated (path)}: emitted when a page is clicked
 	@signal: C{populate-popup (menu)}: hook to populate the context menu
 	@signal: C{copy ()}: copy the current selection to the clipboard
-	@signal: C{insert-link (path)}: called when the user pressed <Ctrl>L on page
+	@signal: C{insert-link (path)}: called when the user pressed Ctrl-L on page
 	'''
 
 	# define signals we want to use - (closure type, return type and arg types)
@@ -382,13 +397,16 @@ class PageTreeView(BrowserTreeView):
 		self.set_name('zim-pageindex')
 		self.notebook = notebook
 		self.navigation = navigation
+		self._autoexpanded = None
+		self._autoexpand = True
+		self._autocollapse = True
 
 		column = Gtk.TreeViewColumn('_pages_')
 		column.set_expand(True)
 		self.append_column(column)
 
 		cr1 = Gtk.CellRendererText()
-		cr1.set_property('ellipsize', Pango.EllipsizeMode.END)
+		self._cr1 = cr1
 		column.pack_start(cr1, True)
 		column.set_attributes(cr1, text=NAME_COL,
 			style=STYLE_COL, sensitive=EXISTS_COL, weight=WEIGHT_COL)
@@ -400,22 +418,42 @@ class PageTreeView(BrowserTreeView):
 		column.pack_start(cr2, False)
 		column.set_attributes(cr2, text=N_CHILD_COL, weight=WEIGHT_COL)
 
-		self.set_tooltip_column(TIP_COL)
-
 		self.set_headers_visible(False)
 
 		self.set_enable_search(True)
 		self.set_search_column(0)
 
-		self.enable_model_drag_source(
-			Gdk.ModifierType.BUTTON1_MASK, (INTERNAL_PAGELIST_TARGET,),
-			Gdk.DragAction.LINK | Gdk.DragAction.MOVE)
-		self.enable_model_drag_dest(
-			(INTERNAL_PAGELIST_TARGET,),
-			Gdk.DragAction.MOVE)
-
 		if model:
 			self.set_model(model)
+
+	def set_use_drag_and_drop(self, use_drag_and_drop):
+		if use_drag_and_drop:
+			self.enable_model_drag_source(
+				Gdk.ModifierType.BUTTON1_MASK, (PAGELIST_TARGET,),
+				Gdk.DragAction.LINK | Gdk.DragAction.MOVE)
+			self.enable_model_drag_dest(
+				(PAGELIST_TARGET,),
+				Gdk.DragAction.MOVE)
+		else:
+			self.unset_rows_drag_source()
+			self.unset_rows_drag_dest()
+
+	def set_use_tooltip(self, use_tooltip):
+		if use_tooltip:
+			self.set_tooltip_column(TIP_COL)
+		else:
+			self.set_tooltip_column(-1)
+
+	def set_use_ellipsize(self, use_ellipsize):
+		'''Set whether to use ellipsize ("...") for page names that are longer
+		than the window size. If disabled the horizontal scrollbar will take over
+		'''
+		value = Pango.EllipsizeMode.END if use_ellipsize else Pango.EllipsizeMode.NONE
+		self._cr1.set_property('ellipsize', value)
+
+	def set_autoexpand(self, autoexpand, autocollapse):
+		self._autoexpand = autoexpand
+		self._autocollapse = autocollapse
 
 	def disconnect_index(self):
 		'''Stop the widget from listening to the index. Used e.g. to
@@ -435,6 +473,14 @@ class PageTreeView(BrowserTreeView):
 		model = self.get_model()
 		treeiter = model.get_iter(treepath)
 		mytreeiter = model.get_user_data(treeiter)
+		selected_path = self.get_selected_path()
+
+		if self._autocollapse:
+			self.restore_autoexpanded_path()
+
+		if self._autoexpand:
+			self.select_treepath(model.get_path(treeiter))
+
 		if mytreeiter.hint == IS_PAGE:
 			path = model.get_indexpath(treeiter)
 			if path:
@@ -493,26 +539,37 @@ class PageTreeView(BrowserTreeView):
 		menu.show_all()
 
 	def do_drag_data_get(self, dragcontext, selectiondata, info, time):
-		assert selectiondata.get_target().name() == INTERNAL_PAGELIST_TARGET_NAME
+		assert selectiondata.get_target().name() == PAGELIST_TARGET_NAME
 		model, iter = self.get_selection().get_selected()
 		path = model.get_indexpath(iter)
+		if not isinstance(path, PageIndexRecord):
+			# Can happen e.g. when overloaded by tags plugin
+			logger.debug('Drag data requested, but we do not have path')
+			return None
 		logger.debug('Drag data requested, we have internal path "%s"', path.name)
-		data = pack_urilist((path.name,))
+		data = PageLinkData(self.notebook, path).get_data_as(PAGELIST_TARGET_ID)
 		selectiondata.set(selectiondata.get_target(), 8, data)
 		zim.gui.clipboard._internal_selection_data = data # HACK issue #390
 
 	def do_drag_data_received(self, dragcontext, x, y, selectiondata, info, time):
-		assert selectiondata.get_target().name() == INTERNAL_PAGELIST_TARGET_NAME
+		assert selectiondata.get_target().name() == PAGELIST_TARGET_NAME
 		data = selectiondata.get_data()
-		logger.debug('Drag data recieved: %r', data)
-		if data is None:
+		logger.debug('Drag data received: %r', data)
+		if data is None or len(data) == 0:
 			data = zim.gui.clipboard._internal_selection_data # HACK issue #390
 			zim.gui.clipboard._internal_selection_data = None
 			logger.debug('Got data via workaround: %s', data)
 
 		names = unpack_urilist(data)
 		assert len(names) == 1, 'Could not get pagenames from: %r' % data
-		source = Path(names[0])
+		if '?' in names[0]:
+			notebookname, path = names[0].split('?', 1)
+			if notebookname in (self.notebook.name, self.notebook.interwiki):
+				source = Path(path)
+			else:
+				return None # TODO: move here from other notebook - might need dialog to confirm ?
+		else:
+			source = Path(names[0])
 
 		dest_row = self.get_dest_row_at_pos(x, y)
 		if dest_row:
@@ -568,6 +625,16 @@ class PageTreeView(BrowserTreeView):
 			return None # index not yet initialized ...
 
 		treepath = model.set_current_page(path) # highlight in model
+
+		if treepath:
+			selected_path = self.get_selected_path()
+			if selected_path != path:
+				if self._autocollapse:
+					self.restore_autoexpanded_path()
+
+				if self._autoexpand:
+					self.select_treepath(treepath)
+
 		return treepath # can be None
 
 	def select_treepath(self, treepath):
@@ -575,12 +642,20 @@ class PageTreeView(BrowserTreeView):
 
 		@param treepath: a gtk TreePath (tuple of integers)
 		'''
+		self._store_expanded_path(treepath)
 		self.expand_to_path(treepath)
 		self.get_selection().select_path(treepath)
 		self.set_cursor(treepath)
 		#~ self.scroll_to_cell(treepath, use_align=True, row_align=0.9)
 		# BUG: align 0.9 doesn't behave as one would expect..
 		self.scroll_to_cell(treepath)
+
+	def get_selected_treepath(self):
+		model, iter = self.get_selection().get_selected()
+		if model is None or iter is None:
+			return None
+		else:
+			return model.get_path(iter)
 
 	def get_selected_path(self):
 		'''Get the selected notebook path
@@ -603,7 +678,40 @@ class PageTreeView(BrowserTreeView):
 				path.up()
 		return path
 
-	def restore_expanded_path(self, path, expanded_path):
+	def get_any_children_expanded(self, path):
+		'''Returns True if any children of C{path} have been expanded'''
+		model = self.get_model()
+		iter = model.iter_children(model.get_iter(path))
+		while iter:
+			if self.row_expanded(model.get_path(iter)):
+				return True
+
+			iter = model.iter_next(iter)
+		else:
+			return False
+
+	def restore_autoexpanded_path(self):
+		if self._autoexpanded:
+			ref1, ref2 = self._autoexpanded
+			if ref1.valid() and (ref2 is None or ref2.valid()):
+				prev_treepath = ref1.get_path()
+				prev_expanded_path = ref2.get_path() if ref2 else None
+				if not self.get_any_children_expanded(prev_treepath):
+					self._restore_expanded_path(prev_treepath, prev_expanded_path)
+				else:
+					# since auto-expanding child paths have been expanded which overrules the auto-expanding
+					pass
+
+		self._autoexpanded = None
+
+	def _store_expanded_path(self, path):
+		expanded_path = self.get_expanded_path(path)
+		model = self.get_model()
+		ref1 = Gtk.TreeRowReference(model, path)
+		ref2 = Gtk.TreeRowReference(model, expanded_path) if expanded_path else None
+		self._autoexpanded = (ref1, ref2)
+
+	def _restore_expanded_path(self, path, expanded_path):
 		'''Collaps path between C{path} and C{expanded_path}'''
 		path = path.copy()
 		if expanded_path is None:

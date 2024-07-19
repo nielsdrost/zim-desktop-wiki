@@ -5,6 +5,17 @@ import sys
 import shutil
 import subprocess
 
+# Check if we run the correct python version
+REQUIRED_MINIMUM_PYTHON_VERSION = (3, 6)
+USED_PYTHON_VERSION = sys.version_info
+if USED_PYTHON_VERSION < REQUIRED_MINIMUM_PYTHON_VERSION:
+	error_message = 'zim needs python >= {major}.{minor}'.format(
+		major=REQUIRED_MINIMUM_PYTHON_VERSION[0],
+		minor=REQUIRED_MINIMUM_PYTHON_VERSION[1],
+	)
+	sys.stderr.write(error_message)
+	sys.exit(1)
+
 try:
 	import py2exe
 except ImportError:
@@ -23,12 +34,6 @@ from zim import __version__, __url__
 
 import msgfmt # also distributed with zim
 import makeman # helper script
-
-try:
-	assert sys.version_info >= (3, 2)
-except:
-	print('zim needs python >= 3.2', file=sys.stderr)
-	sys.exit(1)
 
 
 # Some constants
@@ -73,9 +78,8 @@ def collect_data_files():
 	# Search for data files to be installed in share/
 	data_files = [
 		('share/man/man1', ['man/zim.1']),
-		('share/applications', ['xdg/zim.desktop']),
-		('share/mime/packages', ['xdg/zim.xml']),
-		('share/pixmaps', ['xdg/hicolor/48x48/apps/zim.png']),
+		('share/applications', ['xdg/org.zim_wiki.Zim.desktop']),
+		('share/mime/packages', ['xdg/org.zim_wiki.Zim.xml']),
 		('share/metainfo', ['xdg/org.zim_wiki.Zim.appdata.xml']),
 	]
 
@@ -126,17 +130,15 @@ def fix_dist():
 	# Copy the zim icons a couple of times
 	# Paths for mimeicons taken from xdg-icon-resource
 	# xdg-icon-resource installs:
-	# /usr/local/share/icons/hicolor/.../mimetypes/gnome-mime-application-x-zim-notebook.png
 	# /usr/local/share/icons/hicolor/.../mimetypes/application-x-zim-notebook.png
-	# /usr/local/share/icons/hicolor/.../apps/zim.png
+	# /usr/local/share/icons/hicolor/.../apps/org.zim_wiki.Zim.png
 
 	if os.path.exists('xdg/hicolor'):
 		shutil.rmtree('xdg/hicolor')
 	os.makedirs('xdg/hicolor/scalable/apps')
 	os.makedirs('xdg/hicolor/scalable/mimetypes')
 	for name in (
-		'apps/zim.svg',
-		'mimetypes/gnome-mime-application-x-zim-notebook.svg',
+		'apps/org.zim_wiki.Zim.svg',
 		'mimetypes/application-x-zim-notebook.svg'
 	):
 		shutil.copy('icons/zim48.svg', 'xdg/hicolor/scalable/' + name)
@@ -145,8 +147,7 @@ def fix_dist():
 		os.makedirs('xdg/hicolor/%s/apps' % dir)
 		os.makedirs('xdg/hicolor/%s/mimetypes' % dir)
 		for name in (
-			'apps/zim.png',
-			'mimetypes/gnome-mime-application-x-zim-notebook.png',
+			'apps/org.zim_wiki.Zim.png',
 			'mimetypes/application-x-zim-notebook.png'
 		):
 			shutil.copy('icons/zim%s.png' % size, 'xdg/hicolor/' + dir + '/' + name)

@@ -5,6 +5,152 @@ Jaap Karssenberg <jaap.karssenberg@gmail.com>
 This branch is the Python rewrite and starts with version 0.42.
 Earlier version numbers for zim correspond to the Perl branch.
 
+
+##  0.75.2 - Thu 06 Jul 2023
+* Add pagename completion by words in "Jump to"
+* Let tasklist window remember selection state
+* Let tasklist window use a search bar
+* Add count in tasklist window
+* Fix auto-collapse in page index for child nodes
+* Fix import of gtkspellcheck
+* Make spellcheck more robust for page reload
+* Fix bug in insert screenshot
+* Add scrollbar to custom tool window
+* Fix config dirs for portable install
+* Use environment variable for `XDG_TEMPLATES_DIR`
+* Fix links to anchors on export
+* Fix bug in copy-paste of interwiki links
+* Updated diagrameditor and sequencediagrameditor plugins to generate SVG
+* Add keybinding for cutting the current line(s)
+* Fix fullscreen headerbar visibility
+
+
+##  0.75.1 - Tue 25 Oct 2022
+* Fix bug with relative path notebook icon
+* Fix bug with icons in notebookdialog
+* Fix bug with loading sub-notebooks via "notebook.zim"
+* Fix bug with "--list" commandline
+* Fix issue opening unicode attachements on win32
+* Fix saving preferences for edit bar
+* Fix link visibility in TableEditor
+* Use flatpak locale directory in flatpak
+
+##  0.75.0 - Tue 27 Sep 2022
+* Upgrade Python version requirement to >= 3.6
+* Complete porting all modules to `zim.newfs` and deprecate `zim.fs`
+* Refactor APIs to deal with tokens instead of `etree` interface
+* Add framework for imagegenerators with inline data
+* Refactored ther user interface of the tasklist plugin
+* Make tasklist window persistent
+* Let tasklist window also show closed tasks
+* Let tasks inherit all modifiers from list heading
+* Let "Go to Today" use anchor id for current day
+* Update LinkMap with new options
+* Refactor preference for custom window decoration & toolbar plugin
+* Enables distinct shortcuts for en and em dashes in symbol list
+* Add unicode 8757 ("because") in symbol list
+* Move Selected Text: add preference for short links & save bounds
+* Extend ToC pane context menu
+* Score editor: add check for convert-ly
+* Source View plugin: Don't show hidden languages
+* Export code blocks in markdown as fenced blocks
+* Fix loading GIF images
+* Fix to let the "insert link" dialog allow anchors
+* Allow sidepane focus key to be configured
+* Added action to collapse and expand in PageIndex
+* Add action for "move text" to allow keybinding
+* Support closing an open 'find bar' by pressing ESC in the page view widget
+* Allow cancelling ImageGeneratorDialog using Escape key
+* Version control: fix fossil
+* Fix KDE drag-n-drop bug
+* Fix export with formatting in heading
+* Minimal support for "Terminal" option in desktop files
+* Add preference for not prompting on new folder
+
+##  0.74.3 - Tue 07 Dec 2021
+* Fix issue with broken links on move page
+* Fix bug in copy-paste
+* Fix bug on move page for existing textbuffer
+* Fix bug with saving of notebook editable state
+* Fix for error while loading plugins
+* Fix issue with stray unicode character
+* Fix issue to allow relative document root
+* Fix hack for rendering sourceview blocks
+* Add mnemonic keys to open sidepane tabs
+* Add links and screenshot to macOS app & update README information
+* Improve inline rendering of equations & make image DPI confingurable
+* Add box drawing characters to symbols list
+* Scroll on moving lines with linesorter plugin
+* Move floating table of contents to overlay layer
+
+##  0.74.2 - Mon 11 Oct 2021
+* Let Toolbar plugin also remove window decoration
+* Fix execution of custom tools from Toolbar
+* Add plugin "view" items to Toolbar plugin
+* Make drag&drop optional in the pageindex
+* Add option to toggle tooltips for index panes
+* Fix Zeitgeist plugin to work with Gtk3 branch
+* Improve dialog feedback for invalid input
+* Fix error on cancel insert dialog
+* Let exceptions not block search
+* Make page parser robust for empty files
+
+##  0.74.1 - Thu 23 Sep 2021
+* Add preference to hide edit bar
+* Add separate parameter for wrapped lines linespacing
+* Fix behavior of copying images on copy-paste
+* Fix export of anchors to make valid HTML tags
+* Fix storing of uistate for window panes
+* Fix issues for "file:/path" file URIs
+* Fix bug in "copy link"
+* Make clipboard handling robust for non-local file URI
+* Fix issue with escaping in find input
+* Fix behavior of TrashDialog on error
+* Remove string literal formatting syntax
+
+##  0.74.0 - Tue 14 Sep 2021
+* Support link "anchors" to allow linking within page
+* Add new-style headerbar as window decoration
+* Add auto-hiding headerbar in full screen mode 
+* Add confirmation dialog when trashing pages
+* Replace toolbar by a plugin, introduce "Edit Bar" in pageview
+* Remove statusbar
+* Make single page window editable
+* Keep undostack for the last 10 pages
+* Copy equations on copy-paste
+* Copy image attachments on copy-paste
+* Update relative links on copy-paste formatted text
+* Fix copy-pasting links to another notebook
+* Add Bullet Journal "back arrow" checkbox
+* Add default browser to preferences
+* Add option to paste short relative link names
+* Add support for "INCLUDE file" in templates
+* Add `<Ctrl><Shift>C` for copying the current line
+* Show plugins that failed to load in the plugin list
+* Add auto-expand and -collapse options to tags plugin
+* Add option for horizontal scrollbar to pageindex & tags plugins
+* Add "open backlink in new window" in backlinks plugin
+* Add count and full path options for backlinks plugin
+* Add rename and delete menu entries in attachmentbrowser
+* Improve language selection for sourceview plugin
+* Add border width preference to sourceview plugin
+* Add dark mode preference to equation editor
+* Add Toolbar plugin, including "classic" mode
+* Add Command Palette plugin
+* Also match URL in wiki text for local network
+* Improve read performance for large text attachments
+* Fix issue with unicode mismatch in link and page names
+* Make indexer robust against false folder mtime
+* Make windows installer robust against overwriting data
+* Try to use GtkSourceView 4.x if 3.x not found
+* Fix numbered lists with letters in Markdown export
+* Use Pillow fallback to load WebP images
+* Make appending to page undo-able
+* Highlight "Toggle Editable" button when read-only
+* Add extensions on PageWindow by splitting NotebookView and PageView
+* Show link destination for keyboard navigation
+* Exclude formatting when copying headings
+
 ##  0.73.5 - Sat 30 Jan 2021
 * Fix regression for "www." links in pages
 * Fix bug with email address or url wrapped in higlight markup

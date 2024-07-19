@@ -4,15 +4,15 @@
 
 '''This modules handles export of LaTeX Code'''
 
-import os
 import re
 import string
 import logging
 
-from zim.fs import File, FileNotFoundError
+
+from zim.newfs import FilePath
+from zim.parse.encode import url_encode, URL_ENCODE_READABLE
 from zim.formats import *
 from zim.formats.plain import Dumper as TextDumper
-from zim.parsing import url_encode, URL_ENCODE_READABLE
 from zim.config.dicts import Choice
 
 logger = logging.getLogger('zim.formats.latex')
@@ -52,6 +52,7 @@ class Dumper(TextDumper):
 		XCHECKED_BOX: '\\item[\\XBox]',
 		CHECKED_BOX: '\\item[\\CheckedBox]',
 		MIGRATED_BOX: '\\item[\\RIGHTarrow]',
+		TRANSMIGRATED_BOX: '\\item[\\LEFTarrow]',
 		BULLET: '\\item',
 	}
 
@@ -126,16 +127,26 @@ class Dumper(TextDumper):
 		elif level > 5:
 			level = 5
 
-		text = ''.join(strings)
-		return [self.SECTIONING[self.document_type][level] % text]
+		text = ''.join(strings).strip('\n')
+		return [self.SECTIONING[self.document_type][level] % text, '\n']
+
+	def _start_list(self):
+		if self.context[-1].tag == LISTITEM and \
+			self.context[-1].text and self.context[-1].text[-1].endswith('\n\n'):
+				# strip '\n' introduced by encode_text()
+				self.context[-1].text[-1] = self.context[-1].text[-1][:-1]
 
 	def dump_ul(self, tag, attrib, strings):
+		self._start_list()
+
 		strings.insert(0, '\\begin{itemize}\n')
 		strings.append('\\end{itemize}\n')
 
 		return TextDumper.dump_ul(self, tag, attrib, strings)
 
 	def dump_ol(self, tag, attrib, strings):
+		self._start_list()
+
 		start = attrib.get('start', 1)
 		if start in string.ascii_lowercase:
 			type = 'a'
@@ -149,7 +160,7 @@ class Dumper(TextDumper):
 
 		strings.insert(0, '\\begin{enumerate}[%s]\n' % type)
 		if start > 1:
-			strings.insert(1, '\setcounter{enumi}{%i}\n' % (start - 1))
+			strings.insert(1, '\\setcounter{enumi}{%i}\n' % (start - 1))
 		strings.append('\\end{enumerate}\n')
 
 		return TextDumper.dump_ol(self, tag, attrib, strings)
@@ -168,7 +179,10 @@ class Dumper(TextDumper):
 		else:
 			assert False, 'Unnested li element'
 
-		return (bullet, ' ') + tuple(strings) + ('\n',)
+		if strings[-1].endswith('\n\n'):
+			strings[-1] = strings[-1][:-1] # strip '\n' introduced by encode_text()
+
+		return (bullet, ' ') + tuple(strings)
 
 	def is_supported_image(self, path):
 		# Latex only supports limited image formats by default
@@ -203,7 +217,10 @@ class Dumper(TextDumper):
 			options = ''
 
 		if imagepath.startswith('file://'):
-			imagepath = File(imagepath).path # avoid URIs here
+			try:
+				imagepath = FilePath(imagepath).path # avoid URIs here
+			except:
+				pass # e.g. non-locl uri, malformed path
 		image = '\\includegraphics[%s]{%s}' % (options, imagepath)
 
 		if 'href' in attrib:
@@ -212,14 +229,22 @@ class Dumper(TextDumper):
 		else:
 			return [image]
 
+	def dump_anchor(self, tag, attrib, strings=None):
+		return ("\\label{", attrib['name'], "}")
+
 	def dump_link(self, tag, attrib, strings=None):
+		# TODO: how do you do page links within an exported document
+		#       use \label{} per page start and \ref to link it ??
 		href = self.linker.link(attrib['href'])
-		href = url_encode(href, URL_ENCODE_READABLE)
-		if strings:
-			text = ''.join(strings)
+		if href.startswith('#'):
+			return ['\\ref{%s}' % href.lstrip('#')]
 		else:
-			text = href
-		return ['\\href{%s}{%s}' % (href, text)]
+			href = url_encode(href, URL_ENCODE_READABLE)
+			if strings:
+				text = ''.join(strings)
+			else:
+				text = href
+			return ['\\href{%s}{%s}' % (href, text)]
 
 	def dump_code(self, tag, attrib, strings):
 		# Here we try several possible delimiters for the inline verb
@@ -238,23 +263,23 @@ class Dumper(TextDumper):
 		rows = strings
 
 		aligns, _wraps = TableParser.get_options(attrib)
-		rowline = lambda row: '&'.join([' ' + cell + ' ' for cell in row]) + '\\tabularnewline\n\hline'
+		rowline = lambda row: '&'.join([' ' + cell + ' ' for cell in row]) + '\\tabularnewline\n\\hline'
 		aligns = ['l' if a == 'left' else 'r' if a == 'right' else 'c' if a == 'center' else 'l' for a in aligns]
 
 		for i, row in enumerate(rows):
 			for j, (cell, align) in enumerate(zip(row, aligns)):
 				if '\n' in cell:
-					rows[i][j] = '\shortstack[' + align + ']{' + cell.replace("\n", "\\") + '}'
+					rows[i][j] = '\\shortstack[' + align + ']{' + cell.replace("\n", "\\") + '}'
 
 		# print table
 		table.append('\\begin{tabular}{ |' + '|'.join(aligns) + '| }')
-		table.append('\hline')
+		table.append('\\hline')
 
 		table += [rowline(rows[0])]
-		table.append('\hline')
+		table.append('\\hline')
 		table += [rowline(row) for row in rows[1:]]
 
-		table.append('\end{tabular}')
+		table.append('\\end{tabular}')
 		return [line + "\n" for line in table]
 
 	def dump_line(self, tag, attrib, strings=None):

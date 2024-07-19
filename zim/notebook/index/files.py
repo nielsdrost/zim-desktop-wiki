@@ -120,11 +120,12 @@ class FilesIndexer(SignalEmitter):
 					else:
 						self.delete_file(node_id)
 			except:
-				logger.exception('Error while indexing: %s', path)
 				self.db.execute( # avoid looping
 					'UPDATE files SET index_status = ? WHERE id = ?',
 					(STATUS_UPTODATE, node_id)
 				)
+				logger.exception('Error while indexing: %s', path)
+					# do this logging *after* above update - else test suite still loops due to log-to-error handler
 
 			self.db.commit()
 			yield
@@ -211,9 +212,11 @@ class FilesIndexer(SignalEmitter):
 			path = child.relpath(self.folder)
 			if path in children:
 				child_id, child_mtime, index_status = children[path]
-				if index_status == STATUS_NEED_UPDATE or child.mtime() != child_mtime:
+				if index_status == STATUS_NEED_UPDATE:
 					# If the status was "need update" already, don't overrule it
 					# here with mtime check - else we break flag_reindex()
+					pass
+				elif child.mtime() != child_mtime:
 					self.db.execute(
 						'UPDATE files SET index_status = ? WHERE id = ?',
 						(STATUS_NEED_UPDATE, child_id)
@@ -273,7 +276,7 @@ class FilesIndexer(SignalEmitter):
 		self.db.execute('DELETE FROM files WHERE id == ?', (node_id,))
 
 	def delete_folder(self, node_id):
-		assert node_id != 1, 'BUG: notebook folder went missing ?'
+		assert node_id != 1, 'BUG: notebook folder went missing ? - folder: %s' % self.folder.path
 		for child_id, child_type in self.db.execute(
 			'SELECT id, node_type FROM files WHERE parent == ?',
 			(node_id,)
@@ -378,10 +381,16 @@ class FilesIndexChecker(object):
 					new_status = STATUS_NEED_UPDATE
 
 				else:
-					if mtime == obj.mtime():
-						new_status = STATUS_UPTODATE
+					if node_type == TYPE_FOLDER:
+						if mtime == obj.mtime() and self._check_folder_content(node_id, obj):
+							new_status = STATUS_UPTODATE
+						else:
+							new_status = STATUS_NEED_UPDATE
 					else:
-						new_status = STATUS_NEED_UPDATE
+						if mtime == obj.mtime():
+							new_status = STATUS_UPTODATE
+						else:
+							new_status = STATUS_NEED_UPDATE
 
 				self.db.execute(
 					'UPDATE files SET index_status = ?'
@@ -401,6 +410,15 @@ class FilesIndexChecker(object):
 
 			yield new_status == STATUS_NEED_UPDATE
 
+	def _check_folder_content(self, node_id, folder):
+		# This method adds more robustness for detecting new / missing files
+		# in cases where the folder mtime is not reliable. This is a issue seen
+		# a few times already on cloud synced and encrypted file systems.
+		on_disk = folder.list_names()
+		in_index = sorted(os.path.basename(r['path'])
+			for r in self.db.execute('SELECT path FROM files WHERE parent = ?', (node_id,))
+		)
+		return in_index == on_disk
 
 
 class TestFilesDBTable(object):

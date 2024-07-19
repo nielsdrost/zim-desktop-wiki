@@ -3,43 +3,65 @@
 
 '''Test cases for the zim.notebook module.'''
 
-
-
 import tests
+from tests import os_native_path
+
 
 import os
 import time
 
-from zim.fs import File, Dir
-from zim.newfs.mock import os_native_path
+from zim.fs import adapt_from_oldfs
+from zim.newfs import LocalFile, LocalFolder, Folder, FileChangedError
+from zim.newfs.mock import MockFile
 from zim.config import ConfigManager, XDG_CONFIG_HOME
 from zim.formats import ParseTree
 from zim.formats.wiki import Parser as WikiParser
+from zim.parse.links import is_interwiki_keyword_re
 
 from zim.notebook import *
 from zim.notebook.notebook import NotebookConfig, IndexNotUptodateError, PageExistsError
-from zim.notebook.index import Index
-from zim.notebook.layout import FilesLayout
-
-import zim.newfs
-import zim.newfs.mock
+from zim.notebook.layout import FilesLayout, FILE_TYPE_PAGE_SOURCE, FILE_TYPE_ATTACHMENT
 
 
 class TestNotebookInfo(tests.TestCase):
 
-	def runTest(self):
-		for location, uri in (
-			(File('file:///foo/bar'), 'file:///foo/bar'),
-			('file:///foo/bar', 'file:///foo/bar'),
-			('zim+file:///foo?bar', 'zim+file:///foo?bar'),
+	def testLocationToURI(self):
+		if os.name == 'nt':
+			test = [
+				(LocalFile('file:///C:/foo/bar'), 'file:///C:/foo/bar'),
+				('file:///C:/foo/bar', 'file:///C:/foo/bar'),
+				('zim+file:///C:/foo?bar', 'zim+file:///C:/foo?bar'),
 				# specifically ensure the "?" does not get url encoded
-		):
-			if os.name == 'nt':
-				if isinstance(location, str):
-					location = location.replace('///', '///C:/')
-				uri = uri.replace('///', '///C:/')
+			]
+		else:
+			test = [
+				(LocalFile('file:///foo/bar'), 'file:///foo/bar'),
+				('file:///foo/bar', 'file:///foo/bar'),
+				('zim+file:///foo?bar', 'zim+file:///foo?bar'),
+				# specifically ensure the "?" does not get url encoded
+			]
+
+		for location, uri in test:
 			info = NotebookInfo(location)
 			self.assertEqual(info.uri, uri)
+
+	def testRelIconPath(self):
+		uri = 'file:///C:/foo/bar' if os.name == 'nt' else 'file:///foo/bar'
+		icon = './my_icon.png'
+		info = NotebookInfo(uri, icon=icon)
+		self.assertEqual(info.icon, uri + '/my_icon.png')
+
+	def testCreateValidInterwikiKey(self):
+		for name, key in (
+			('Foo', 'Foo'),
+			('Foo Bar', 'Foo_Bar'),
+			('Foo*Bar', 'Foo_Bar'),
+			('Foo-Bar', 'Foo-Bar'),
+			('Foo.Bar', 'Foo.Bar'),
+			('.Foo.Bar', '_Foo.Bar'),
+		):
+			self.assertEqual(create_valid_interwiki_key(name), key)
+			self.assertTrue(is_interwiki_keyword_re.match(key))
 
 
 @tests.slowTest
@@ -53,7 +75,7 @@ class TestNotebookInfoList(tests.TestCase):
 			file.remove()
 
 	def runTest(self):
-		root = Dir(self.create_tmp_dir('some_utf8_here_\u0421\u0430\u0439'))
+		root = self.setUpFolder(name='some_utf8_here_\u0421\u0430\u0439', mock=tests.MOCK_ALWAYS_REAL)
 
 		# Start empty - see this is no issue
 		list = get_notebook_list()
@@ -64,7 +86,7 @@ class TestNotebookInfoList(tests.TestCase):
 		self.assertIsNone(info)
 
 		# Now create it
-		dir = root.subdir('/notebook')
+		dir = root.folder('/notebook')
 		init_notebook(dir, name='foo')
 
 		# And put it in the list and resolve it by name
@@ -128,15 +150,31 @@ class TestNotebookInfoList(tests.TestCase):
 		self.assertEqual(interwiki_link('bar?Foo'), 'zim+' + uri1 + '?Foo') # name
 		self.assertEqual(interwiki_link('Bar?Foo'), 'zim+' + uri1 + '?Foo') # name
 
-		# Check backward compatibility
-		file = File('tests/data/notebook-list-old-format.list')
+
+class TestNotebookInfoListBackwardCompatibility(tests.TestCase):
+
+	def runTest(self):
+		# Check backward compatibility for old file format
+		# Format is name, value pair separated by whitespace (tab or space)
+		folder = self.setUpFolder()
+		file = folder.file('notebook-list-old-format.list')
+		lines = [
+			"_default_\tdebug\n",
+			"Notes\t~/Notes\n",
+			"   \n",
+			"# some comment \n",
+			"debug\t%s\n" % os_native_path('/home/user/code/zim.debug').replace('\\', '/'),
+			"Foo\\ Bar %s\n" % os_native_path('/home/user/Foo Bar').replace('\\', '/').replace(' ', '\\ '),
+		]
+		file.writelines(lines)
+
 		list = NotebookInfoList(file)
 		self.assertEqual(list[:], [
-			NotebookInfo(Dir(path).uri) for path in
-				('~/Notes', '/home/user/code/zim.debug', '/home/user/Foo Bar')
+			NotebookInfo(LocalFolder(path).uri) for path in
+				map(os_native_path, ('~/Notes', '/home/user/code/zim.debug', '/home/user/Foo Bar'))
 		])
 		self.assertEqual(list.default,
-			NotebookInfo(Dir('/home/user/code/zim.debug').uri))
+			NotebookInfo(LocalFolder(os_native_path('/home/user/code/zim.debug')).uri))
 
 
 @tests.slowTest
@@ -151,14 +189,18 @@ class TestResolveNotebook(tests.TestCase):
 
 	def runTest(self):
 		# First test some paths
-		for input, uri in (
-			('file:///foo/bar', 'file:///foo/bar'),
-			('~/bar', Dir('~/bar').uri),
-		):
-			if os.name == 'nt':
-				input = input.replace('///', '///C:/')
-				if not '///C:/' in uri:
-					uri = uri.replace('///', '///C:/')
+		if os.name == 'nt':
+			test_paths = (
+				('file:///C:/foo/bar', 'file:///C:/foo/bar'),
+				('~/bar', LocalFolder('~/bar').uri),
+			)
+		else:
+			test_paths =(
+				('file:///foo/bar', 'file:///foo/bar'),
+				('~/bar', LocalFolder('~/bar').uri),
+			)
+
+		for input, uri in test_paths:
 			info = resolve_notebook(input)
 			self.assertEqual(info.uri, uri)
 
@@ -167,7 +209,8 @@ class TestResolveNotebook(tests.TestCase):
 		self.assertIsNone(info)
 
 		# add an entry and show we get it
-		dir = Dir(self.create_tmp_dir()).subdir('foo')
+		root = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		dir = root.folder('foo')
 		init_notebook(dir, name='foo')
 
 		list = get_notebook_list()
@@ -193,8 +236,16 @@ class TestBuildNotebook(tests.TestCase):
 import os
 import sys
 notebook = sys.argv[1]
-os.mkdir(notebook)
-os.mkdir(notebook + '/foo')
+notebookfile = notebook + "/notebook.zim"
+
+assert not os.path.exists(notebookfile), "Already exists: %s" % notebookfile
+
+try:
+	os.mkdir(notebook)
+	os.mkdir(notebook + '/foo')
+except FileExistsError:
+	pass
+
 for path in (
 	notebook + "/notebook.zim",
 	notebook + "/foo/bar.txt"
@@ -220,16 +271,21 @@ mount=%s %s
 			return dir
 
 		nbid = None
-		for uri, path in (
+		for uri, href in (
 			(self.notebookdir.uri, None), # first run triggers automount
 			(self.notebookdir.uri, None), # repeat to check automount & check uniqueness
 			(self.notebookdir.file('notebook.zim').uri, None),
-			(self.notebookdir.file('foo/bar.txt').uri, Path('foo:bar')),
+			(self.notebookdir.file('foo/bar.txt').uri, HRef.new_from_wiki_link('foo:bar')),
 		):
 			info = NotebookInfo(uri)
-			nb, p = build_notebook(info)
+			nb, pl = build_notebook(info)
 			self.assertEqual(nb.folder.path, self.notebookdir.path)
-			self.assertEqual(p, path)
+
+			if pl:
+				self.assertEqual(pl, href)
+			else:
+				self.assertIsNone(pl)
+
 			if nbid is None:
 				nbid = id(nb)
 			else:
@@ -252,12 +308,7 @@ class TestNotebook(tests.TestCase):
 
 		page1 = self.notebook.get_page(Path('Tree:foo'))
 		page2 = self.notebook.get_page(Path('Tree:foo'))
-		self.assertTrue(page1.valid)
 		self.assertTrue(id(page2) == id(page1)) # check usage of weakref
-		self.notebook.flush_page_cache(Path('Tree:foo'))
-		page3 = self.notebook.get_page(Path('Tree:foo'))
-		self.assertTrue(id(page3) != id(page1))
-		self.assertFalse(page1.valid)
 
 		page = self.notebook.get_page(Path('Test:foo'))
 		text = page.dump('plain')
@@ -271,14 +322,11 @@ class TestNotebook(tests.TestCase):
 		#~ self.assertFalse(re) # no return value
 		#~ self.assertEqual(page.dump('plain'), text) # object reverted
 		#~ self.assertFalse(page.modified)
-		self.notebook.flush_page_cache(page)
-		page = self.notebook.get_page(page) # new object
+
 		self.assertEqual(page.dump('plain'), text)
 		page.parse('plain', newtext)
 		self.assertEqual(page.dump('plain'), newtext)
 		self.notebook.store_page(page)
-		self.notebook.flush_page_cache(page)
-		page = self.notebook.get_page(page) # new object
 		self.assertEqual(page.dump('plain'), newtext)
 
 		# ensure storing empty tree works
@@ -434,8 +482,6 @@ class TestNotebook(tests.TestCase):
 			# probably the index did not clean up placeholders correctly
 		self.assertTrue(page.hascontent)
 
-		self.assertFalse(copy.valid)
-
 	def testCaseSensitiveMove(self):
 		from zim.notebook.index import LINK_DIR_BACKWARD
 		self.notebook.move_page(Path('Test:foo'), Path('Test:Foo'))
@@ -446,30 +492,38 @@ class TestNotebook(tests.TestCase):
 
 	def testResolveFile(self):
 		'''Test notebook.resolve_file()'''
-		from zim.fs import adapt_from_newfs, Dir
-		dir = Dir(self.notebook.folder.path) # XXX
+		dir = LocalFolder(self.notebook.folder.path) # XXX - resolve_file does not use mock files
 
 		path = Path('Foo:Bar')
 		self.notebook.config['Notebook']['document_root'] = './notebook_document_root'
-		doc_root = self.notebook.document_root
-		self.assertEqual(doc_root, dir.subdir('notebook_document_root'))
+		doc_root = adapt_from_oldfs(self.notebook.document_root)
+		self.assertEqual(doc_root, dir.folder('notebook_document_root'))
 		for link, wanted, cleaned in (
-			('~/test.txt', File('~/test.txt'), '~/test.txt'),
-			(r'~\test.txt', File('~/test.txt'), '~/test.txt'),
-			('file:///test.txt', File('file:///test.txt'), None),
-			('file:/test.txt', File('file:///test.txt'), None),
-			('file://localhost/test.txt', File('file:///test.txt'), None),
+			('~/test.txt', LocalFile('~/test.txt'), '~/test.txt'),
+			(r'~\test.txt', LocalFile('~/test.txt'), '~/test.txt'),
+			('~/test/', LocalFolder('~/test'), '~/test/'),
+			(os_native_path('file:///test.txt'), LocalFile(os_native_path('file:///test.txt')), None),
+			(os_native_path('file:/test.txt'), LocalFile(os_native_path('file:///test.txt')), None),
+			(os_native_path('file://localhost/test.txt'), LocalFile(os_native_path('file:///test.txt')), None),
+			('file:///C:/test.txt', LocalFile('file:///C:/test.txt'), None),
+			('file:///C:/test/', LocalFolder('file:///C:/test'), None),
 			('/test.txt', doc_root.file('test.txt'), '/test.txt'),
 			('../../notebook_document_root/test.txt', doc_root.file('test.txt'), '/test.txt'),
 			('./test.txt', dir.file('Foo/Bar/test.txt'), './test.txt'),
+			('./test/', dir.folder('Foo/Bar/test'), './test/'),
 			(r'.\test.txt', dir.file('Foo/Bar/test.txt'), './test.txt'),
 			('../test.txt', dir.file('Foo/test.txt'), '../test.txt'),
+			('../test/', dir.folder('Foo/test'), '../test/'),
 			(r'..\test.txt', dir.file('Foo/test.txt'), '../test.txt'),
 			('../Bar/Baz/test.txt', dir.file('Foo/Bar/Baz/test.txt'), './Baz/test.txt'),
-			(r'C:\foo\bar', File('file:///C:/foo/bar'), None),
-			(r'Z:\foo\bar', File('file:///Z:/foo/bar'), None),
+			('../Other/Baz/test.txt', dir.file('Foo/Other/Baz/test.txt'), '../Other/Baz/test.txt'),
+			('./../Other/Baz/test.txt', dir.file('Foo/Other/Baz/test.txt'), '../Other/Baz/test.txt'),
+			(r'C:\foo\bar', LocalFile('file:///C:/foo/bar'), None),
+			(r'Z:\foo\bar', LocalFile('file:///Z:/foo/bar'), None),
+			(r'Z:\foo\bar\\', LocalFolder('file:///Z:/foo/bar'), None),
 		):
-			#~ print link, '>>', self.notebook.resolve_file(link, path)
+			#print("== LINK", link)
+			#print('>>', self.notebook.resolve_file(link, path))
 			if cleaned is not None and not cleaned.startswith('/'):
 				cleaned = os_native_path(cleaned)
 			self.assertEqual(
@@ -483,52 +537,13 @@ class TestNotebook(tests.TestCase):
 		self.assertEqual(
 			self.notebook.relative_filepath(dir.file('foo.txt')), os_native_path('./foo.txt'))
 
-
-
-#	def testResolveLink(self):
-#		'''Test page.resolve_link()'''
-#		page = self.notebook.get_page(':Test:foo')
-#		for link, wanted in (
-			#~ (':foo:bar', ('page', ':foo:bar')),
-#			('foo:bar', ('page', ':Test:foo:bar')),
-#			('Test', ('page', ':Test')),
-#			('Test:non-existent', ('page', ':Test:non-existent')),
-#			('user@domain.com', ('mailto', 'mailto:user@domain.com')),
-#			('mailto:user@domain.com', ('mailto', 'mailto:user@domain.com')),
-#			('http://zim-wiki.org', ('http', 'http://zim-wiki.org')),
-#			('foo://zim-wiki.org', ('foo', 'foo://zim-wiki.org')),
-			#~ ('file://'),
-			#~ ('/foo/bar', ('file', '/foo/bar')),
-			#~ ('man?test', ('man', 'test')),
-#		): self.assertEqual(self.notebook.resolve_link(link, page), wanted)
-
-	#~ def testResolveName(self):
-		#~ '''Test store.resolve_name().'''
-		#~ print('\n'+'='*10+'\nSTORE: %s' % self.store)
-#~
-		#~ # First make sure basic list function is working
-		#~ def list_pages(name):
-			#~ for page in self.store.get_pages(name):
-				#~ yield page.basename
-		#~ self.assertTrue('Test' in list_pages(''))
-		#~ self.assertTrue('foo' in list_pages(':Test'))
-		#~ self.assertTrue('bar' in list_pages(':Test:foo'))
-		#~ self.assertFalse('Dus' in list_pages(':Test:foo'))
-#~
-		#~ # Now test the resolving algorithm - only testing low level
-		#~ # function in store, so path "anchor" does not work, search
-		#~ # is strictly right to left through the namespace, if any
-		#~ for link, namespace, name in (
-			#~ ('BAR','Test:foo','Test:foo:bar'),
-			#~ ('test',None,'Test'),
-			#~ ('test','Test:foo:bar','Test'),
-			#~ ('FOO:Dus','Test:foo:bar','Test:foo:Dus'),
-			#~ # FIXME more ambigous test data
-		#~ ):
-			#~ print('-'*10+'\nLINK %s (%s)' % (link, namespace))
-			#~ r = self.store.resolve_name(link, namespace=namespace)
-			#~ print('RESULT %s' % r)
-			#~ self.assertEqual(r, name)
+	def testReadOnlyNotebookGivesReadOnlyPages(self):
+		page = self.notebook.get_page(Path('Test'))
+		self.assertFalse(page.readonly)
+		self.notebook._page_cache.clear() # XXX
+		self.notebook.readonly = True # XXX: should not be assigned like this in normal application usage
+		page = self.notebook.get_page(Path('Test'))
+		self.assertTrue(page.readonly)
 
 
 class TestNotebookCaseInsensitiveFileSystem(TestNotebook):
@@ -575,6 +590,40 @@ class TestEndOfLine(tests.TestCase):
 		self._test_eol('dos', b'\r\n')
 
 
+@tests.slowTest
+class TestNotebookSharedProperty(tests.TestCase):
+
+	def _create_notebook(self, shared):
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		config = NotebookConfig(folder.file('notebook.zim'))
+		config['Notebook']['shared'] = shared
+		config.write()
+		notebook = Notebook.new_from_dir(folder)
+		return notebook
+
+	def testSharedTrue(self):
+		notebook = self._create_notebook(shared=True)
+		self.assertFalse(notebook.cache_dir.ischild(notebook.folder))
+
+	def testSharedFalse(self):
+		notebook = self._create_notebook(shared=False)
+		self.assertTrue(notebook.cache_dir.ischild(notebook.folder))
+
+
+@tests.slowTest
+class TestEmptyNotebookFolderNotRemoved(tests.TestCase):
+	# Due to "clenup" on removing tmp files an emty folder can be removed
+	# ensure this does not happen during initalization when using an empty
+	# folder as notebook
+
+	def runTest(self):
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		folder.touch()
+		self.assertTrue(folder.exists())
+		notebook = Notebook.new_from_dir(folder)
+		self.assertTrue(folder.exists())
+
+
 class TestUpdateLinksOnMovePage(tests.TestCase):
 
 	def getNotebookContent(self, notebook):
@@ -592,23 +641,23 @@ class TestUpdateLinksOnMovePage(tests.TestCase):
 				links.add((link.source.name, link.target.name))
 		return links
 
-	def movePage(self, pre, move, post):
+	def movePage(self, pre, move, post, update_links=True):
 		notebook = self.setUpNotebook(content=pre[0])
 		self.assertEqual(self.getNotebookLinks(notebook), set(pre[1]))
 		with tests.LoggingFilter('zim.notebook', message='Number of links after move'):
-			notebook.move_page(Path(move[0]), Path(move[1]))
+			notebook.move_page(Path(move[0]), Path(move[1]), update_links=update_links)
 		self.assertEqual(self.getNotebookContent(notebook), post[0])
 		self.assertEqual(self.getNotebookLinks(notebook), set(post[1]))
 
 	def testFloatingLink(self):
 		self.movePage(
 			pre=(
-				{'A': 'test 123\n', 'B': '[[A]]\n'},
+				{'A': 'test 123\n', 'B': '[[A]]\n[[A|page a]]\n[[A#anchor]]\n'},
 				[('B', 'A')]
 			),
 			move=('A', 'C'),
 			post=(
-				{'C': 'test 123\n', 'B': '[[C]]\n'},
+				{'C': 'test 123\n', 'B': '[[C]]\n[[C|page a]]\n[[C#anchor]]\n'},
 				[('B', 'C')]
 			)
 		)
@@ -917,6 +966,21 @@ class TestUpdateLinksOnMovePage(tests.TestCase):
 			)
 		)
 
+	def testShortNamesAsTextUpdated(self):
+		# Short link name behavior in this case is *not* depending on notebook
+		# property - should always do the logical thing
+		self.movePage(
+			pre=(
+				{'SomePage:A': 'test 123\n', 'B': '[[SomePage:A|A]]\n'},
+				[('B', 'SomePage:A')]
+			),
+			move=('SomePage:A', 'SomePage:C'),
+			post=(
+				{'SomePage': '', 'SomePage:C': 'test 123\n', 'B': '[[SomePage:C|C]]\n'},
+				[('B', 'SomePage:C')]
+			)
+		)
+
 	def testOtherLinksNotChanged(self):
 		self.movePage(
 			pre=(
@@ -937,10 +1001,10 @@ class TestUpdateLinksOnMovePage(tests.TestCase):
 	def testMultipleLinksOnePage(self):
 		self.movePage(
 			pre=({
-					'A': 'test 123',
-					'A:A1': 'test 123',
-					'B': '[[A]]\n[[:A]]\n[[D]]\n[[A:A1]]',
-					'D': 'test 123',
+					'A': 'test 123\n',
+					'A:A1': 'test 123\n',
+					'B': '[[A]]\n[[:A]]\n[[D]]\n[[A:A1]]\n',
+					'D': 'test 123\n',
 				},
 				[('B', 'A'), ('B', 'A:A1'), ('B', 'D')]
 			),
@@ -980,6 +1044,128 @@ class TestUpdateLinksOnMovePage(tests.TestCase):
 				[('B', 'D')]
 			)
 		)
+
+	def testFloatingLinkFromNestedPage(self):
+		# Based on report issue #1725
+		# These links are technically floating even though they look like the
+		# full path. Default "insert link" will produce this format.
+		# Error happened because when updating "Calendar:Week 1"  the link
+		# "Project" resolves to "Calendar:Project" which has no relation with
+		# the old root and we need to figure out the floating behavior.
+		self.movePage(
+			pre=(
+				{
+					'Archive': 'test 123\n',
+					'Calendar': '[[Project]]\n[[Project:Note]]\n',
+					'Calendar:Week 1': '[[Project]]\n[[Project:Note]]\n',
+					'Project': 'test 123\n',
+					'Project:Note': 'test 123\n',
+				},
+				[
+					('Calendar', 'Project'),
+					('Calendar', 'Project:Note'),
+					('Calendar:Week 1', 'Project'),
+					('Calendar:Week 1', 'Project:Note'),
+				]
+			),
+			move=('Project', 'Archive:Project'),
+			post=(
+				{
+					'Archive': 'test 123\n',
+					'Archive:Project': 'test 123\n',
+					'Archive:Project:Note': 'test 123\n',
+					'Calendar': '[[Archive:Project]]\n[[Archive:Project:Note]]\n',
+					'Calendar:Week 1': '[[Archive:Project]]\n[[Archive:Project:Note]]\n',
+				},
+				[
+					('Calendar', 'Archive:Project'),
+					('Calendar', 'Archive:Project:Note'),
+					('Calendar:Week 1', 'Archive:Project'),
+					('Calendar:Week 1', 'Archive:Project:Note'),
+				]
+			)
+		)
+
+	def testFloatingLinkFromNestedPage2(self):
+		# Based on report issue #1725
+		# Additional issue found while deep diving this issue: need to check
+		#
+		# To reproduce that case, run same test as above but *without* updating
+		# links. Here only link database should be updated on target of the
+		# links. Before the fix "Calendar:Week 1" kept referring to "Project",
+		# which seems correct, but isn't because it creates a circular dependency
+		# between placeholders from "Calendar" and "Calendar:Week 1".
+		self.movePage(
+			pre=(
+				{
+					'Archive': 'test 123\n',
+					'Calendar': '[[Project]]\n[[Project:Note]]\n',
+					'Calendar:Week 1': '[[Project]]\n[[Project:Note]]\n',
+					'Project': 'test 123\n',
+					'Project:Note': 'test 123\n',
+				},
+				[
+					('Calendar', 'Project'),
+					('Calendar', 'Project:Note'),
+					('Calendar:Week 1', 'Project'),
+					('Calendar:Week 1', 'Project:Note'),
+				]
+			),
+			move=('Project', 'Archive:Project'),
+			update_links=False,
+			post=(
+				{
+					'Archive': 'test 123\n',
+					'Archive:Project': 'test 123\n',
+					'Archive:Project:Note': 'test 123\n',
+					'Calendar': '[[Project]]\n[[Project:Note]]\n',
+					'Calendar:Week 1': '[[Project]]\n[[Project:Note]]\n',
+					'Project': '',
+					'Project:Note': '',
+					'Calendar:Project': '',
+					'Calendar:Project:Note': '',
+				},
+				[
+					('Calendar', 'Project'),
+					('Calendar', 'Project:Note'),
+					('Calendar:Week 1', 'Calendar:Project'),
+					('Calendar:Week 1', 'Calendar:Project:Note'),
+				]
+			)
+		)
+
+
+
+class TestUpdateCacheOnMovePage(tests.TestCase):
+	# This test case is based on a bug report (issue #1689) where the state
+	# of the page objects is not properly updated when moving back to a location
+	# with an existing page object state including a textbuffer.
+	# For completeness also added version without buffer
+
+	def testMoveBackForthWithTextBuffer(self):
+		self.move_back_forth(with_text_buffer=True)
+
+	def testMoveBackForthWithOutTextBuffer(self):
+		self.move_back_forth(with_text_buffer=False)
+
+	def move_back_forth(self, with_text_buffer):
+		notebook = self.setUpNotebook(mock=tests.MOCK_DEFAULT_REAL, content=('page1',))
+
+		page1 = notebook.get_page(Path('page1'))
+		if with_text_buffer:
+			buffer1 = page1.get_textbuffer(MockTextBuffer)
+		self.assertIn('test 123', ''.join(page1.dump('wiki')))
+
+		notebook.move_page(page1, Path('page2'))
+		page2 = notebook.get_page(Path('page2'))
+		if with_text_buffer:
+			buffer2 = page1.get_textbuffer(MockTextBuffer)
+		self.assertEqual(''.join(page1.dump('wiki')), '')
+		self.assertIn('test 123', ''.join(page2.dump('wiki')))
+
+		notebook.move_page(page2, Path('page1'))
+		self.assertIn('test 123', ''.join(page1.dump('wiki')))
+		self.assertEqual(''.join(page2.dump('wiki')), '')
 
 
 class TestPath(tests.TestCase):
@@ -1075,6 +1261,10 @@ class TestHRefFromWikiLink(tests.TestCase):
 			('Child2:AAA', HREF_REL_FLOATING, 'Child2:AAA', 'Child2:AAA'),
 			('Foo Bar', HREF_REL_FLOATING, 'Foo Bar', 'Foo Bar'),
 			('Foo_Bar', HREF_REL_FLOATING, 'Foo Bar', 'Foo Bar'),
+			('#anchor', HREF_REL_FLOATING, '', '#anchor'),
+			(':Foo#anchor', HREF_REL_ABSOLUTE, 'Foo', ':Foo#anchor'),
+			('+Foo#anchor', HREF_REL_RELATIVE, 'Foo', '+Foo#anchor'),
+			('#anchor', HREF_REL_FLOATING, '', '#anchor'),
 		):
 			href = HRef.new_from_wiki_link(link)
 			self.assertEqual(href.rel, rel)
@@ -1086,10 +1276,9 @@ class TestPage(TestPath):
 	'''Test page object'''
 
 	def generator(self, name):
-		from zim.newfs.mock import MockFile, MockFolder
 		file = MockFile('/mock/test/page.txt')
 		folder = MockFile('/mock/test/page/')
-		return Page(Path(name), False, file, folder)
+		return Page(Path(name), False, file, folder, 'wiki')
 
 	def testPageObject(self):
 		'''Test Page object'''
@@ -1098,21 +1287,11 @@ class TestPage(TestPath):
 <link href='foo:bar'>foo:bar</link>
 <link href='bar'>bar</link>
 <tag name='baz'>@baz</tag>
+<anchor name='bottom'>#bottom</anchor>
 </zim-tree>
 '''		)
 		page = self.generator('Foo')
 		page.set_parsetree(tree)
-
-		links = list(page.get_links())
-		self.assertEqual(links, [
-			('page', 'foo:bar', {}),
-			('page', 'bar', {}),
-		])
-
-		tags = list(page.get_tags())
-		self.assertEqual(tags, [
-			('baz', {'name': 'baz'}),
-		])
 
 		self.assertEqual(page.get_parsetree().tostring(), tree.tostring())
 			# ensure we didn't change the tree
@@ -1125,10 +1304,9 @@ class TestPage(TestPath):
 		self.assertFalse(page.hascontent)
 
 	def testShouldAutochangeHeading(self):
-		from zim.newfs.mock import MockFile, MockFolder
 		file = MockFile('/mock/test/page.txt')
 		folder = MockFile('/mock/test/page/')
-		page = Page(Path('Foo'), False, file, folder)
+		page = Page(Path('Foo'), False, file, folder, 'wiki')
 
 		tree = ParseTree().fromstring('<zim-tree></zim-tree>')
 		tree.set_heading_text("Foo")
@@ -1139,11 +1317,9 @@ class TestPage(TestPath):
 		self.assertFalse(page.heading_matches_pagename())
 
 	def testPageSource(self):
-		from zim.newfs.mock import MockFile, MockFolder
-
 		file = MockFile('/mock/test/page.txt')
 		folder = MockFile('/mock/test/page/')
-		page = Page(Path('Foo'), False, file, folder)
+		page = Page(Path('Foo'), False, file, folder, 'wiki')
 
 		self.assertFalse(page.readonly)
 		self.assertFalse(page.hascontent)
@@ -1151,7 +1327,7 @@ class TestPage(TestPath):
 		self.assertIsNone(page.mtime)
 		self.assertIsNone(page.get_parsetree())
 
-		page1 = Page(Path('Foo'), False, file, folder)
+		page1 = Page(Path('Foo'), False, file, folder, 'wiki')
 		self.assertTrue(page.isequal(page1))
 
 		tree = ParseTree().fromstring('''\
@@ -1159,6 +1335,7 @@ class TestPage(TestPath):
 <link href='foo:bar'>foo:bar</link>
 <link href='bar'>bar</link>
 <tag name='baz'>@baz</tag>
+<anchor name='bottom'>#bottom</anchor>
 </zim-tree>
 '''		)
 		page.set_parsetree(tree)
@@ -1185,12 +1362,12 @@ class TestPage(TestPath):
 		file.write('foo 123')
 		page.set_parsetree(tree)
 
-		self.assertRaises(zim.newfs.FileChangedError, page._store)
+		self.assertRaises(FileChangedError, page._store)
 
 		### Custom header should be preserved
 		### Also when setting new ParseTree - e.g. after edting
 		file.writelines(lines[0:3] + ['X-Custom-Header: MyTest'] + lines[3:])
-		page = Page(Path('Foo'), False, file, folder)
+		page = Page(Path('Foo'), False, file, folder, 'wiki')
 		tree = page.get_parsetree()
 		page.set_parsetree(tree)
 		page._store()
@@ -1214,30 +1391,74 @@ class TestPage(TestPath):
 		page = self.generator('Test')
 		file = page.source_file
 		tree = ParseTree().fromstring('<zim-tree>ABC\n</zim-tree>\n')
-
-		class MockUIObject(object):
-
-			def __init__(self):
-				self.parsetree = None
-
-			def set_parsetree(self, parsetree):
-				self.parsetree = parsetree
-
-			def get_parsetree(self):
-				return self.parsetree
-
-		uiobject = MockUIObject()
-		page.set_ui_object(uiobject)
+		buffer = page.get_textbuffer(MockTextBuffer)
 
 		self.assertFalse(page.check_source_changed())
 		page.set_parsetree(tree)
 		self.assertEqual(page.dump('wiki'), ['ABC\n'])
 		self.assertFalse(page.check_source_changed())
-		file.write('DEF')
+		file.write('DEF\n')
 		self.assertEqual(page.dump('wiki'), ['ABC\n'])
 		self.assertTrue(page.check_source_changed())
 		self.assertEqual(page.dump('wiki'), ['DEF\n'])
 		self.assertFalse(page.check_source_changed())
+
+	def testCanReloadTextBufferIfReadonly(self):
+		# This is a crucial feature to allow unblocking the application if
+		# a read-only textbuffer got modified due to a bug
+		page = self.generator('Test')
+		page._readonly = True # XXX: never do this in application code
+		buffer = page.get_textbuffer(MockTextBuffer)
+
+		tree = ParseTree().fromstring('<zim-tree>ABC\n</zim-tree>\n')
+		buffer.set_parsetree(tree)
+		buffer.set_modified(True)
+
+		page.reload_textbuffer()
+		self.assertFalse(buffer.get_modified())
+
+	def testEmptyFile(self):
+		self._testEmptyFile('')
+
+	def testEmptyFileOnlyHeaders(self):
+		self._testEmptyFile(
+			'Content-Type: text/x-zim-wiki\n'
+			'Wiki-Format: zim 0.6\n'
+			'Creation-Date: 2015-11-01T16:28:31+01:00\n'
+			'\n'
+		)
+
+	def _testEmptyFile(self, text):
+		page = self.generator('empty_page')
+		page.source_file.write(text)
+		with tests.LoggingFilter('zim.parse', 'Parser got empty string'):
+			parsetree = page.get_parsetree()
+		self.assertFalse(parsetree.hascontent)
+
+
+class MockTextBuffer(object):
+
+	def __init__(self, parsetree):
+		self.parsetree = parsetree
+		self.modified = False
+
+	def set_modified(self, modified):
+		self.modified = modified
+
+	def get_modified(self):
+		return self.modified
+
+	def connect(self, *a):
+		pass
+
+	def set_parsetree(self, parsetree):
+		self.parsetree = parsetree
+
+	def get_parsetree(self):
+		return self.parsetree
+
+	def clear(self):
+		self.parsetree = None
 
 
 class TestMovePageNewNotebook(tests.TestCase):
@@ -1303,11 +1524,11 @@ class TestPageChangeFile(tests.TestCase):
 	# Reloading the pageshould show the changes.
 
 	def runTest(self):
-		dir = Dir(self.create_tmp_dir())
+		dir = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
 		notebook = Notebook.new_from_dir(dir)
 
 		page = notebook.get_page(Path('SomePage'))
-		file = zim.newfs.LocalFile(page.source_file.path)
+		file = LocalFile(page.source_file.path)
 		self.assertIsNot(file, page.source_file)
 
 		def change_file(file, text):
@@ -1346,13 +1567,12 @@ class TestPageChangeFile(tests.TestCase):
 		self.assertEqual(page2.dump('wiki'), ['Test 123\n'])
 
 		# Now we change the file and want to see the change
-		file = zim.newfs.LocalFile(page1.source_file.path)
+		file = LocalFile(page1.source_file.path)
 		self.assertIsNot(file, page1.source_file)
 		change_file(file, 'Test 5 6 7 8\n')
 
 		page3 = notebook.get_page(Path('SomeOtherPage'))
 		self.assertIs(page3, page1)
-		self.assertTrue(page3.valid)
 		self.assertEqual(page3.dump('wiki'), ['Test 5 6 7 8\n'])
 
 
@@ -1422,10 +1642,47 @@ class TestBackgroundSave(tests.TestCase):
 		self.assertEqual(signals['stored-page'], [(page,)]) # post handler happened as well
 
 
-class AttachmentsFolderIsinstance(tests.TestCase):
+class TestFilesLayout(tests.TestCase):
 
-	def runTest(self):
-		from zim.newfs import Folder
+	def _test_page_vs_not_a_page(self, folder, layout, pagefile, notapagefile):
+		self.assertTrue(layout.is_source_file(pagefile))
+		self.assertFalse(layout.is_source_file(notapagefile))
+
+		self.assertEqual(layout.map_file(pagefile), (Path('Page'), FILE_TYPE_PAGE_SOURCE))
+		self.assertEqual(layout.map_file(notapagefile), (Path(':'), FILE_TYPE_ATTACHMENT))
+		self.assertEqual(layout.map_filepath(pagefile.relpath(folder)), (Path('Page'), FILE_TYPE_PAGE_SOURCE))
+		self.assertEqual(layout.map_filepath(notapagefile.relpath(folder)), (Path(':'), FILE_TYPE_ATTACHMENT))
+
+		self.assertEqual(layout.index_list_children(Path(':')), [Path('Page')])
+
+	def testCheckFirstLineForTextFiles(self):
+		folder = self.setUpFolder()
+		pagefile = folder.file('Page.txt')
+		pagefile.write('Content-Type: text/x-zim-wiki\n\nFoo Bar\n')
+		notapagefile = folder.file('NotAPage.txt')
+		notapagefile.write('Foo Bar\n')
+		layout = FilesLayout(folder, default_extension='.txt')
+		self._test_page_vs_not_a_page(folder, layout, pagefile, notapagefile)
+
+	def testNoCheckFirstLineForNonTextFiles(self):
+		folder = self.setUpFolder()
+		pagefile = folder.file('Page.md')
+		pagefile.write('Foo Bar\n')
+		notapagefile = folder.file('NotAPage.txt')
+		notapagefile.write('Foo Bar\n')
+		layout = FilesLayout(folder, default_extension='.md')
+		self._test_page_vs_not_a_page(folder, layout, pagefile, notapagefile)
+
+	def testInValidFileNamesRejected(self):
+		folder = self.setUpFolder()
+		pagefile = folder.file('Page.txt')
+		pagefile.write('Content-Type: text/x-zim-wiki\n\nFoo Bar\n')
+		notapagefile = folder.file('Not A Page.txt')
+		notapagefile.write('Content-Type: text/x-zim-wiki\n\nFoo Bar\n')
+		layout = FilesLayout(folder, default_extension='.txt')
+		self._test_page_vs_not_a_page(folder, layout, pagefile, notapagefile)
+
+	def testAttachmentsFolderIsinstance(self):
 		folder = self.setUpFolder()
 		layout = FilesLayout(folder)
 		afolder = layout.get_attachments_folder(Path('Test'))

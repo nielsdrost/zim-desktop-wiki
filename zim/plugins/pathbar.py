@@ -20,9 +20,7 @@ from zim.notebook.page import shortest_unique_names
 from zim.gui.mainwindow import MainWindowExtension
 from zim.gui.widgets import encode_markup_text, gtk_popup_at_pointer, widget_set_css
 from zim.gui.uiactions import UIActions, PAGE_ACCESS_ACTIONS
-from zim.gui.clipboard import \
-	INTERNAL_PAGELIST_TARGET_NAME, INTERNAL_PAGELIST_TARGET, \
-	pack_urilist
+from zim.gui.clipboard import PageLinkData, PAGELIST_TARGET_NAME, PAGELIST_TARGET_ID, PAGELIST_TARGET
 
 import zim.gui.clipboard
 
@@ -188,7 +186,8 @@ class ScrolledHBox(Gtk.HBox):
 
 	def add(self, child):
 		self._state = None
-		widget_set_css(child, 'zim-pathbar-path-button', 'padding: 2px 6px 2px 6px;')
+		#widget_set_css(child, 'zim-pathbar-path-button', 'padding: 2px 6px 2px 6px;')
+		widget_set_css(child, 'zim-pathbar-path-button', 'padding-right: 6px; padding-left: 6px;')
 			# Make buttons a bit smaller (but keep some horizontal padding)
 		req = child.get_preferred_size()[1]
 		child.set_size_request(min(req.width, MAX_BUTTON_WIDTH), req.height)
@@ -498,7 +497,9 @@ class PathBar(ScrolledHBox):
 			self.remove(button)
 
 		paths = list(self.get_paths())
-		for path, label in zip(paths, shortest_unique_names(paths)):
+		labels = self._get_labels(paths)
+
+		for path, label in zip(paths, labels):
 			button = Gtk.ToggleButton(label=label, use_underline=False)
 			button.set_tooltip_text(path.name)
 			button.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
@@ -509,7 +510,7 @@ class PathBar(ScrolledHBox):
 			button.connect('drag-data-get', self.on_drag_data_get)
 			button.drag_source_set(
 				Gdk.ModifierType.BUTTON1_MASK,
-				(Gtk.TargetEntry.new(*INTERNAL_PAGELIST_TARGET),),
+				(Gtk.TargetEntry.new(*PAGELIST_TARGET),),
 				Gdk.DragAction.LINK
 			)
 			button.show_all()
@@ -521,8 +522,15 @@ class PathBar(ScrolledHBox):
 	def get_paths(self):
 		'''To be implemented by the sub class, should return a list
 		(or iterable) of notebook paths to show in the pathbar.
+		The visible part of these paths is determined by _get_labels.
 		'''
 		raise NotImplemented
+
+	def _get_labels(self, paths):
+		'''Returns list (or iterable) of path labels to show in the pathbar.
+		Usually this means the shortest unique names, but may also be just
+		the basenames as is the case with C{PATHBAR_PATH}.'''
+		return shortest_unique_names(paths)
 
 	def _select(self, path):
 		for button in self.get_scrolled_children():
@@ -563,10 +571,10 @@ class PathBar(ScrolledHBox):
 		return menu
 
 	def on_drag_data_get(self, button, context, selectiondata, info, time):
-		assert selectiondata.get_target().name() == INTERNAL_PAGELIST_TARGET_NAME
+		assert selectiondata.get_target().name() == PAGELIST_TARGET_NAME
 		path = button.zim_path
 		logger.debug('Drag data requested from PathBar, we have internal path "%s"', path.name)
-		data = pack_urilist((path.name,))
+		data = PageLinkData(self.notebook, path).get_data_as(PAGELIST_TARGET_ID)
 		selectiondata.set(selectiondata.get_target(), 8, data)
 		zim.gui.clipboard._internal_selection_data = data # HACK issue #390
 
@@ -636,6 +644,11 @@ class NamespacePathBar(PathBar):
 		paths.pop(0) # remove root
 		paths.append(path) # add leaf
 		return paths
+
+	def _get_labels(self, paths):
+		# labels don't need to be unique -
+		# the nth month has a nth day, and that's okay
+		return [path.basename for path in paths]
 
 PathBarMainWindowExtension._klasses[PATHBAR_PATH] = NamespacePathBar
 

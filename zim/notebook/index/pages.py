@@ -3,17 +3,16 @@
 
 
 from datetime import datetime
+from typing import Generator, Optional
 
 import sqlite3
 import logging
 
 logger = logging.getLogger('zim.notebook.index')
 
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 from zim.notebook.page import Path, HRef, \
 	HREF_REL_ABSOLUTE, HREF_REL_FLOATING, HREF_REL_RELATIVE
-from zim.tokenparser import TokenBuilder
-
 from zim.formats import ParseTreeBuilder
 
 from .base import *
@@ -131,13 +130,15 @@ class PagesIndexer(IndexerBase):
 			return # nothing to do
 
 		row = self._select(pagename)
-		assert row is not None
+		if row is None:
+			self.insert_page(pagename, filerow['id']) # May have been changed file type
+			row = self._select(pagename)
 
 		if row['source_file'] == filerow['id']:
 			file = self.layout.root.file(filerow['path'])
 			format = self.layout.get_format(file)
 			mtime = file.mtime()
-			tree = format.Parser().parse(file.read())
+			tree = format.Parser().parse(file.read(), file_input=True)
 			self.update_page(pagename, mtime, tree)
 		else:
 			pass # some conflict file changed
@@ -148,7 +149,8 @@ class PagesIndexer(IndexerBase):
 			return # nothing to do
 
 		row = self._select(pagename)
-		assert row is not None
+		if row is None:
+			return # not a source file after all (e.g. .txt attachment)
 
 		if row['source_file'] == filerow['id']:
 			if row['n_children'] > 0:
@@ -166,7 +168,7 @@ class PagesIndexer(IndexerBase):
 			else:
 				self.remove_page(pagename)
 		else:
-			raise NotImplemented # some conflict removed
+			pass # some conflict removed - or not a source file in the first place (.txt attachment)
 
 	def insert_page(self, pagename, file_id):
 		return self._insert_page(pagename, False, file_id)
@@ -351,7 +353,7 @@ class PagesViewInternal(object):
 			raise IndexConsistencyError('No page for page_id "%r"' % page_id)
 		return PageIndexRecord(row)
 
-	def get_page_id(self, pagename):
+	def get_page_id(self, pagename: Path) -> int:
 		row = self.db.execute(
 			'SELECT id FROM pages WHERE name=?', (pagename.name,)
 		).fetchone()
@@ -386,6 +388,11 @@ class PagesViewInternal(object):
 			# By default ignore link placeholders to avoid circular
 			# dependencies between links and placeholders
 			assert href.rel == HREF_REL_FLOATING
+
+			# link to anchor on current page
+			if not href.parts():
+				return (start, start_id, relnames + href.parts())
+
 			anchor_key = natural_sort_key(href.parts()[0])
 
 			if relnames:
@@ -508,11 +515,11 @@ class PagesViewInternal(object):
 class PagesView(IndexView):
 	'''Index view that exposes the "pages" table in the index'''
 
-	def __init__(self, db):
+	def __init__(self, db: sqlite3.Connection):
 		IndexView.__init__(self, db)
 		self._pages = PagesViewInternal(db)
 
-	def lookup_by_pagename(self, pagename):
+	def lookup_by_pagename(self, pagename: Path) -> PageIndexRecord:
 		r = self.db.execute(
 			'SELECT * FROM pages WHERE name=?', (pagename.name,)
 		).fetchone()
@@ -521,9 +528,8 @@ class PagesView(IndexView):
 		else:
 			return PageIndexRecord(r)
 
-	def list_pages(self, path=None):
+	def list_pages(self, path: Optional[Path] = None) -> Generator[PageIndexRecord, None, None]:
 		'''Generator for child pages of C{path}
-		@param path: a L{Path} object
 		@returns: yields L{Path} objects for children of C{path}
 		@raises IndexNotFoundError: if C{path} is not found in the index
 		'''
@@ -533,24 +539,25 @@ class PagesView(IndexView):
 			page_id = self._pages.get_page_id(path) # can raise
 		return self._list_pages(page_id)
 
-	def _list_pages(self, page_id):
+	def _list_pages(self, page_id: int):
 		for row in self.db.execute(
 			'SELECT * FROM pages WHERE parent=? ORDER BY sortkey, name',
 			(page_id,)
 		):
 			yield PageIndexRecord(row)
 
-	def n_list_pages(self, path=None):
+	def n_list_pages(self, path: Optional[Path] = None) -> int:
+		'''@returns: number of child pages of C{path}.
+		@param path: optional, defaults to root path
+		'''
 		page_id = self._pages.get_page_id(path or ROOT_PATH)
 		c, = self.db.execute(
 			'SELECT COUNT(*) FROM pages WHERE parent=?', (page_id,)
 		).fetchone()
 		return c
 
-	def match_pages(self, path, text, limit=10):
+	def match_pages(self, path: Path, text: str, limit: int = 10) -> Generator[PageIndexRecord, None, None]:
 		'''Generator for child pages of C{path} that match C{text} in their name
-		@param path: a L{Path} object
-		@param text: a string
 		@param limit: max number of results
 		@returns: yields L{Path} objects for children of C{path}
 		@raises IndexNotFoundError: if C{path} is not found in the index
@@ -561,7 +568,7 @@ class PagesView(IndexView):
 			page_id = self._pages.get_page_id(path) # can raise
 		return self._match_pages(page_id, text, limit)
 
-	def _match_pages(self, page_id, text, limit):
+	def _match_pages(self, page_id: int, text: str, limit: int):
 		# The LIKE keyword does not handle unicode case-insensitivity
 		# therefore we need python lower() to do the job
 		for row in self.db.execute(
@@ -570,7 +577,7 @@ class PagesView(IndexView):
 		):
 			yield PageIndexRecord(row)
 
-	def match_all_pages(self, text, limit=10):
+	def match_all_pages(self, text: str, limit: int = 10) -> Generator[PageIndexRecord, None, None]:
 		'''Like C{match_pages()} except not limited a specific namespace'''
 		for row in self.db.execute(
 			'SELECT * FROM pages WHERE lowerbasename LIKE ? ORDER BY length(name), sortkey, name LIMIT ?',
@@ -578,7 +585,24 @@ class PagesView(IndexView):
 		):
 			yield PageIndexRecord(row)
 
-	def walk(self, path=None):
+
+	def match_all_pages_by_words(self, words: list, limit: int = 10) -> Generator[PageIndexRecord, None, None]:
+		'''Like C{match_all_pages()}, except it performs a search based on multiple words'''
+
+		query_fragments = ['SELECT * FROM pages WHERE 1']
+		query_parameters = []
+
+		for w in words:
+			query_fragments.append("AND name LIKE ?")
+			query_parameters.append("%%%s%%" % w.lower())
+
+		query_fragments.append('ORDER BY length(name), sortkey, name LIMIT ?')
+		query_parameters.append(limit)
+
+		for row in self.db.execute(" ".join(query_fragments), query_parameters):
+			yield PageIndexRecord(row)
+
+	def walk(self, path: Optional[Path] = None) -> Generator[PageIndexRecord, None, None]:
 		'''Generator function to yield all pages in the index, depth
 		first
 
@@ -593,16 +617,16 @@ class PagesView(IndexView):
 		page_id = self._pages.get_page_id(path) if path else ROOT_ID # can raise
 		return self._pages.walk(page_id)
 
-	def walk_bottomup(self, path=None):
+	def walk_bottomup(self, path: Optional[Path] = None) -> Generator[PageIndexRecord, None, None]:
 		page_id = self._pages.get_page_id(path) if path else ROOT_ID # can raise
 		return self._pages.walk_bottomup(page_id)
 
-	def n_all_pages(self):
-		'''Returns to total number of pages in the index'''
+	def n_all_pages(self) -> int:
+		'''@returns: total number of pages in the index'''
 		c, = self.db.execute('SELECT COUNT(*) FROM pages').fetchone()
 		return c - 1 # don't count ROOT
 
-	def get_has_previous_has_next(self, path):
+	def get_has_previous_has_next(self, path: Path) -> bool:
 		if path.isroot:
 			raise ValueError('Can\'t use root')
 
@@ -622,10 +646,9 @@ class PagesView(IndexView):
 
 		return not is_first, not is_last
 
-	def get_previous(self, path):
+	def get_previous(self, path: Path) -> Optional[Path]:
 		'''Get the previous path in the index, in the same order that
 		L{walk()} will yield them
-		@param path: a L{Path} object
 		@returns: a L{Path} object or C{None} if {path} is the first page in
 		the index
 		'''
@@ -664,10 +687,9 @@ class PagesView(IndexView):
 			else:
 				return PageIndexRecord(r)
 
-	def get_next(self, path):
+	def get_next(self, path: Path) -> Optional[Path]:
 		'''Get the next path in the index, in the same order that
 		L{walk()} will yield them
-		@param path: a L{Path} object
 		@returns: a L{Path} object or C{None} if C{path} is the last page in
 		the index
 		'''
@@ -712,7 +734,7 @@ class PagesView(IndexView):
 					if r is None:
 						raise IndexConsistencyError('Missing parent')
 
-	def lookup_from_user_input(self, name, reference=None):
+	def lookup_from_user_input(self, name: str, reference: Path = None) -> Path:
 		'''Lookup a pagename based on user input
 		@param name: the user input as string
 		@param reference: a L{Path} in case relative links are supported as
@@ -735,7 +757,7 @@ class PagesView(IndexView):
 								source, href, ignore_link_placeholders=False)
 			return pagename
 
-	def resolve_link(self, source, href):
+	def resolve_link(self, source: Path, href: HRef) -> Path:
 		'''Find the end point of a link
 		Depending on the link type (absolute, relative, or floating),
 		this method first determines the starting point of the link
@@ -750,11 +772,8 @@ class PagesView(IndexView):
 		id, pagename = self._pages.resolve_link(source, href)
 		return pagename
 
-	def create_link(self, source, target):
+	def create_link(self, source: Path, target: Path) -> HRef:
 		'''Determine best way to represent a link between two pages
-		@param source: a L{Path} object
-		@param target: a L{Path} object
-		@returns: a L{HRef} object
 		'''
 		if target == source: # weird edge case ..
 			return HRef(HREF_REL_FLOATING, target.basename)
@@ -764,7 +783,7 @@ class PagesView(IndexView):
 			href = self._find_floating_link(source, target)
 			return href or HRef(HREF_REL_ABSOLUTE, target.name)
 
-	def _find_floating_link(self, source, target):
+	def _find_floating_link(self, source: Path, target: Path) -> Optional[Path]:
 		# Relative links only resolve for pages that have a common parent
 		# with the source page. So we start finding the common parents and
 		# if that does not resolve (e.g. because same name also occurs on a
@@ -799,7 +818,7 @@ class PagesView(IndexView):
 			else:
 				return None # no floating link possible
 
-	def list_recent_changes(self, limit=None, offset=None):
+	def list_recent_changes(self, limit: Optional[int] = None, offset: Optional[int] = None) -> Generator[PageIndexRecord, None, None]:
 		assert not (offset and not limit), "Can't use offset without limit"
 		if limit:
 			selection = ' LIMIT %i OFFSET %i' % (limit, offset or 0)

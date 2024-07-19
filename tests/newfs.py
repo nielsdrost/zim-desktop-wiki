@@ -35,19 +35,6 @@ def modify_file_mtime(path, func):
 	#~ print('>>>', m, mtime)
 
 
-#~ class FilterOverWriteWarning(tests.LoggingFilter):
-
-	#~ logger = 'zim.fs'
-	#~ message = 'mtime check failed'
-
-
-#~ class FilterFileMissingWarning(tests.LoggingFilter):
-
-	#~ logger = 'zim.fs'
-	#~ message = 'File missing:'
-
-
-
 def P(path):
 	# Returns a windows path on windows, to make test cases platform
 	# independent and keep them readable
@@ -105,7 +92,10 @@ class TestFilePath(tests.TestCase):
 		# Test home folder fallback
 		f = FilePath('~non-existing-user/foo')
 		homedirname = HOME.dirname or '' # Build environments may have HOME set as e.g. '/builddir'
-		self.assertEqual(f.path, P('/'.join((homedirname, 'non-existing-user', 'foo'))))
+		self.assertIn(f.path, (
+			P(os.path.expanduser('~non-existing-user/foo')),
+			P('/'.join((homedirname, 'non-existing-user', 'foo')))
+		))
 
 
 	def testShareDrivePath(self):
@@ -299,13 +289,22 @@ class TestFS(object):
 		self.assertEqual(file.read(), '')
 		self.assertEqual(file.read_binary(), b'')
 
-		file.write('test 123\n')
-		self.assertEqual(file.read(), 'test 123\n')
-		self.assertEqual(list(file.readlines()), ['test 123\n'])
-		self.assertEqual(list(file), ['test 123\n'])
+		file.write('test 123\ntest abc\n')
+		self.assertEqual(file.read(), 'test 123\ntest abc\n')
+		self.assertEqual(file.read(size=4), 'test')
+		self.assertEqual(file.read(size=100), 'test 123\ntest abc\n')
+		self.assertEqual(file.read(size=-1), 'test 123\ntest abc\n')
+		self.assertEqual(file.read(size=None), 'test 123\ntest abc\n')
+		self.assertEqual(file.readline(), 'test 123\n')
+		self.assertEqual(file.readline(size=4), 'test')
+		self.assertEqual(file.readline(size=100), 'test 123\n')
+		self.assertEqual(file.readline(size=-1), 'test 123\n')
+		self.assertEqual(file.readline(size=None), 'test 123\n')
+		self.assertEqual(list(file.readlines()), ['test 123\n', 'test abc\n'])
+		self.assertEqual(list(file), ['test 123\n', 'test abc\n'])
 
 		file.touch()
-		self.assertEqual(file.read(), 'test 123\n') # no trucation!
+		self.assertEqual(file.read(), 'test 123\ntest abc\n') # no trucation!
 
 		mylines = ['lines1\n', 'lines2\n', 'lines3\n']
 		file.writelines(mylines)
@@ -806,7 +805,14 @@ class TestLocalFS(tests.TestCase, TestFS):
 		self.assertIsInstance(rfile, File)
 		self.assertEqual(rfile.path, file.path)
 
+		self.assertRaises(FileNotFoundError, localFileOrFolder, file.path + '/')
+			# object exists, but we explicitly expect a folder, which doesn't
+
 		rfile = localFileOrFolder(file.dirname)
+		self.assertIsInstance(rfile, Folder)
+		self.assertEqual(rfile.path, file.dirname)
+
+		rfile = localFileOrFolder(file.dirname + '/')
 		self.assertIsInstance(rfile, Folder)
 		self.assertEqual(rfile.path, file.dirname)
 
@@ -917,9 +923,9 @@ class TestLocalFS(tests.TestCase, TestFS):
 
 class TestTmpFile(tests.TestCase):
 
-	def runTest(self):
+	def testPersistent(self):
 		dir = get_tmpdir()
-		file = TmpFile('foo.txt')
+		file = TmpFile('tmp.txt')
 		file.write('test 123\n')
 		self.assertTrue(file.ischild(dir))
 
@@ -927,6 +933,29 @@ class TestTmpFile(tests.TestCase):
 		self.assertTrue(os.path.isfile(path))
 		del file
 		self.assertFalse(os.path.isfile(path)) # not persistent
+
+	def testNotPersistent(self):
+		dir = get_tmpdir()
+		file = TmpFile('tmp.txt', persistent=True)
+		file.write('test 123\n')
+		self.assertTrue(file.ischild(dir))
+
+		path = file.path
+		self.assertTrue(os.path.isfile(path))
+		del file
+		self.assertTrue(os.path.isfile(path)) # persistent
+		os.remove(path) # cleanup
+
+	def testMoveToRegularFile(self):
+		file = TmpFile('tmp.txt', persistent=True)
+		file.write('test 123\n')
+
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		dest = folder.file('tmp.txt')
+
+		file.moveto(dest)
+		self.assertFalse(os.path.isfile(file.path))
+		self.assertTrue(os.path.isfile(dest.path))
 
 
 class TestFunc(tests.TestCase):

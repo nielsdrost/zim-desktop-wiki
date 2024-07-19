@@ -14,7 +14,7 @@ contents.
 The notebook keeps track of all pages using an C{Index} which is stored
 in a C{sqlite} database. Methods that need a list of pages in the
 notebook always use the index rather than a direct lookup. See
-L{zim.notebook.index} for more details.
+L{notebook.zim.index} for more details.
 
 The C{NotebookInfoList} is defined to help access known notebooks and
 a C{NotebookInfo} object can be used to access the notebook properties
@@ -27,29 +27,30 @@ almost always better to use L{build_notebook()} rather than istantiating
 the notebook directly.
 
 @note: for more information about threading and concurency,
-see L{zim.notebook.operations}
+see L{notebook.zim.operations}
 
 '''
 
 import logging
 
-logger = logging.getLogger('zim.notebook')
+logger = logging.getLogger('notebook.zim')
 
 
-from zim.fs import FilePath, File, Dir, FileNotFoundError
-from zim.parsing import url_decode
+from zim.newfs import FileNotFoundError, localFileOrFolder, LocalFolder, FilePath
+from zim.parse.encode import url_decode
 
 
 from .info import NotebookInfo, NotebookInfoList, \
-	resolve_notebook, get_notebook_list, get_notebook_info, interwiki_link
+	resolve_notebook, get_notebook_list, get_notebook_info, interwiki_link, create_valid_interwiki_key
 
 from .operations import NotebookOperation, SimpleAsyncOperation, \
 	NotebookOperationOngoing, NotebookState
 
 from .notebook import Notebook, NotebookExtension, TrashNotSupportedError, \
-	PageNotFoundError, PageNotAllowedError, PageExistsError, PageReadOnlyError
+	PageNotFoundError, PageNotAllowedError, PageNotAvailableError, \
+	PageExistsError
 
-from .page import Path, Page, \
+from .page import Path, Page, PageReadOnlyError, \
 	HRef, HREF_REL_ABSOLUTE, HREF_REL_FLOATING, HREF_REL_RELATIVE
 
 from .layout import encode_filename, decode_filename
@@ -57,63 +58,77 @@ from .layout import encode_filename, decode_filename
 from .index import IndexNotFoundError, \
 	LINK_DIR_BACKWARD, LINK_DIR_BOTH, LINK_DIR_FORWARD
 
+from .content_updater import update_parsetree_and_copy_images, \
+	set_parsetree_attributes_to_resolve_links, replace_parsetree_links_and_copy_images
 
 
 def build_notebook(location):
 	'''Create a L{Notebook} object for a file location
 	Tries to automount file locations first if needed
 	@param location: a L{FilePath} or a L{NotebookInfo}
-	@returns: a L{Notebook} object and a L{Path} object or C{None}
+	@returns: a L{Notebook} object and an (absolute) L{HRef} object or C{None}
 	@raises FileNotFoundError: if file location does not exist and could not be mounted
 	'''
 	uri = location.uri
-	page = None
+	href = None
 
 	# Decipher zim+file:// uris
 	if uri.startswith('zim+file://'):
 		uri = uri[4:]
 		if '?' in uri:
-			uri, page = uri.split('?', 1)
-			page = url_decode(page)
-			page = Path(page)
+			uri, localpart = uri.split('?', 1)
+			localpart = url_decode(localpart)
+			href = HRef.new_from_wiki_link(localpart)
+
+	if '#' in uri:
+		uri, anchor = uri.split('#', 1)
+		href = HRef.new_from_wiki_link('#' + anchor)
 
 	# Automount if needed
 	filepath = FilePath(uri)
-	if not (filepath.exists() or filepath.__add__('zim.notebook').exists()):
-		# The folder of a mount point can exist, so check for specific content
+	try:
+		fileorfolder = localFileOrFolder(filepath)
+	except FileNotFoundError:
 		mount_notebook(filepath)
-		if not filepath.exists():
-			raise FileNotFoundError(filepath)
-
-	# Figure out the notebook dir
-	if filepath.isdir():
-		dir = Dir(uri)
-		file = None
+		fileorfolder = localFileOrFolder(uri) # Can raise FileNotFoundError
 	else:
-		file = File(uri)
-		dir = file.dir
+		# The folder of a mount point can exist, so check for specific content
+		if isinstance(fileorfolder, LocalFolder) \
+			and not fileorfolder.file('notebook.zim').exists():
+				mount_notebook(filepath)
+				fileorfolder = localFileOrFolder(uri) # Can raise FileNotFoundError
 
-	if file and file.basename == 'notebook.zim':
-		file = None
+	if isinstance(fileorfolder, LocalFolder):
+		folder, file = fileorfolder, None
+	elif fileorfolder.basename == 'notebook.zim':
+		folder, file = fileorfolder.parent(), None
 	else:
-		parents = list(dir)
-		parents.reverse()
-		for parent in parents:
+		folder, file = fileorfolder.parent(), fileorfolder
+
+	if not folder.file('notebook.zim').exists():
+		for parent in folder.parents():
 			if parent.file('notebook.zim').exists():
-				dir = parent
+				folder = parent
 				break
 
 	# Resolve the page for a file
 	if file:
-		path = file.relpath(dir)
+		path = file.relpath(folder)
 		if '.' in path:
 			path, _ = path.rsplit('.', 1) # remove extension
-		path = path.replace('/', ':')
-		page = Path(path)
+		path = path.replace('\\', ':').replace('/', ':')
+		if href and not href.names:
+			# Anchor was given, add page name
+			href.names = Path.makeValidPageName(path)
+		else:
+			href = HRef.new_from_wiki_link(path)
+	elif href and not href.names:
+		# Anchor without page name - ignore silent
+		href = None
 
 	# And finally create the notebook
-	notebook = Notebook.new_from_dir(dir)
-	return notebook, page
+	notebook = Notebook.new_from_dir(folder)
+	return notebook, href
 
 
 def mount_notebook(filepath):
@@ -124,10 +139,10 @@ def mount_notebook(filepath):
 	groups = sorted([k for k in list(configdict.keys()) if k.startswith('Path')])
 	for group in groups:
 		path = group[4:].strip() # len('Path') = 4
-		dir = Dir(path)
-		if is_relevant_mount_point(dir, filepath):
+		folder = LocalFolder(path)
+		if is_relevant_mount_point(folder, filepath):
 			configdict[group].define(mount=String(None))
-			handler = ApplicationMountPointHandler(dir, **configdict[group])
+			handler = ApplicationMountPointHandler(folder, **configdict[group])
 			if handler(filepath):
 				break
 
@@ -135,23 +150,19 @@ def mount_notebook(filepath):
 def is_relevant_mount_point(root, path):
 	# path can be notebook folder, or file path below notebook folder
 	# root can be parent folder of notebook folder or notebook folder itself
-	if path.path == root.path:
+	# mount point itself can exist, and can even contain files (e.g. README with mount instructions)
+	# so only check existance of specific path and notebook.zim file
+	if root.file('notebook.zim').exists():
+		return False
+	elif path.path == root.path:
 		return True
 	elif path.ischild(root):
 		# Check none of the intermediate folders exist
-		parent = path.dir
-		if parent.path == root.path:
-			return not (parent.exists() or parent.__add__('zim.notebook').exists())
-				# Folder can exists, but also needs to be valid notebook
-		else:
-			while parent.path != root.path:
-				if parent.exists():
-					return False
-				parent = parent.dir
-			else:
-				# Do not check "zim.notebook", mount point can be parent
-				# of notebook folder, missing folder tree says enough
-				return True
+		for parent in LocalFolder(path).parents():
+			if parent.path == root.path:
+				break
+			elif parent.exists():
+				return False
 	else:
 		return False
 
@@ -170,12 +181,17 @@ class ApplicationMountPointHandler(object):
 			Application(self.mount).run()
 		except:
 			logger.exception('Failed to run: %s', self.mount)
-		return path.exists()
+
+		try:
+			path = localFileOrFolder(path)
+		except FileNotFoundError:
+			return False
+		else:
+			return path.exists()
 
 
 def init_notebook(dir, name=None):
 	'''Initialize a new notebook in a directory'''
-	assert isinstance(dir, Dir)
 	from .notebook import NotebookConfig
 	dir.touch()
 	config = NotebookConfig(dir.file('notebook.zim'))

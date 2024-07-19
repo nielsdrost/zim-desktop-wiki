@@ -15,7 +15,7 @@ import glob
 
 from zim.plugins import PluginClass
 from zim.plugins.base.imagegenerator import ImageGeneratorClass, BackwardImageGeneratorObjectType
-from zim.fs import File, TmpFile
+from zim.newfs import LocalFile, TmpFile
 from zim.config import data_file
 from zim.templates import get_template
 from zim.applications import Application, ApplicationError
@@ -52,27 +52,32 @@ This is a core plugin shipping with zim.
 
 	plugin_preferences = [
 		# key, type, label, default
-		('include_header', 'string', _('Common include header'), '\include "predefined-guitar-fretboards.ly"'), # T: plugin preference
+		('include_header', 'string', _('Common include header'), '\\include "predefined-guitar-fretboards.ly"'), # T: plugin preference
 		('include_footer', 'string', _('Common include footer'), ''), # T: plugin preference
 	]
 
 	@classmethod
 	def check_dependencies(klass):
 		has_lilypond = Application(lilypond_cmd).tryexec()
-		return has_lilypond, [('GNU Lilypond', has_lilypond, True)]
+		has_convertly = Application(convertly_cmd).tryexec()
+		return has_lilypond and has_convertly, [
+				('GNU Lilypond', has_lilypond, True),
+				('convert-ly', has_convertly, True)
+			]
 
 
 class BackwardScoreImageObjectType(BackwardImageGeneratorObjectType):
 
 	name = 'image+score'
-	label = _('Score') # T: menu item
+	label = _('Musical Score') # T: menu item
 	syntax = None
 	scriptname = 'score.ly'
-	imagefile_extension = '.png'
 
 
 class ScoreGenerator(ImageGeneratorClass):
 
+	imagefile_extension = '.png'
+	
 	cur_lilypond_version = None
 
 	def __init__(self, plugin, notebook, page):
@@ -120,28 +125,28 @@ class ScoreGenerator(ImageGeneratorClass):
 
 		# Call convert-ly to convert document of current version of
 		# Lilypond.
-		clogfile = File(scorefile.path[:-3] + '-convertly.log') # len('.ly) == 3
+		clogfile = LocalFile(scorefile.path[:-3] + '-convertly.log') # len('.ly) == 3
 		try:
 			convertly = Application(convertly_cmd)
-			convertly.run((scorefile.basename,), cwd=scorefile.dir)
+			convertly.run((scorefile.basename,), cwd=scorefile.parent())
 		except ApplicationError:
 			clogfile.write('convert-ly failed.\n')
 			return None, clogfile
 
 
 		# Call lilypond to generate image.
-		logfile = File(scorefile.path[:-3] + '.log') # len('.ly') == 3
+		logfile = LocalFile(scorefile.path[:-3] + '.log') # len('.ly') == 3
 		try:
 			lilypond = Application(lilypond_cmd)
-			lilypond.run(('-dlog-file=' + logfile.basename[:-4], scorefile.basename,), cwd=scorefile.dir)
+			lilypond.run(('-dlog-file=' + logfile.basename[:-4], scorefile.basename,), cwd=scorefile.parent())
 		except ApplicationError:
 			# log should have details of failure
 			return None, logfile
-		pngfile = File(scorefile.path[:-3] + '.png') # len('.ly') == 3
+		pngfile = LocalFile(scorefile.path[:-3] + '.png') # len('.ly') == 3
 
 		return pngfile, logfile
 
 	def cleanup(self):
 		path = self.scorefile.path
 		for path in glob.glob(path[:-3] + '*'):
-			File(path).remove()
+			LocalFile(path).remove()

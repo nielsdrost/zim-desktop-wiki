@@ -13,13 +13,13 @@ import locale
 
 from zim.gui.widgets import Dialog, BrowserTreeView, \
 	ScrolledWindow, ScrolledTextView, InputForm, input_table_factory, get_window, help_text_factory
-from zim.gui.applications import CustomizeOpenWithDialog, open_folder_prompt_create
+from zim.gui.applications import CustomizeOpenWithDialog, open_folder_prompt_create, ApplicationManager
 
 from zim.plugins import PLUGIN_FOLDER
 from zim.config import String, ConfigManager
 from zim.plugins import PluginManager
-from zim.main import ZIM_APPLICATION
 
+from zim.gui.applications import ui_preferences as application_preferences
 from zim.gui.mainwindow import ui_preferences as interface_preferences
 from zim.gui.pageview import ui_preferences as pageview_preferences
 
@@ -47,9 +47,14 @@ def localeWarningBar(enc):
 
 class PreferencesDialog(Dialog):
 
-	def __init__(self, widget, default_tab=None, select_plugin=None):
+	def __init__(self, widget, show_tab=None, select_plugin=None):
+		'''Constructor
+		@param show_tab: tab to present in the dialog
+		@select_plugin: plugin to present in the dialog
+		'''
 		Dialog.__init__(self, widget, _('Preferences')) # T: Dialog title
 		self.preferences = ConfigManager.preferences
+		self.main_window = widget
 
 		# warning for locale
 		_pref_enc = locale.getpreferredencoding()
@@ -72,7 +77,7 @@ class PreferencesDialog(Dialog):
 			# From GTK Doc: Note that due to historical reasons, GtkNotebook refuses
 			# to switch to a page unless the child widget is visible.
 			vbox.show()
-			if category == default_tab:
+			if category == show_tab:
 				gtknotebook.set_current_page(index)
 
 			fields = []
@@ -81,6 +86,7 @@ class PreferencesDialog(Dialog):
 
 			for section, preferences in (
 				('GtkInterface', interface_preferences),
+				('Application', application_preferences),
 				('PageView', pageview_preferences)
 			):
 				for p in [p for p in preferences if p[2] == category]:
@@ -117,8 +123,7 @@ class PreferencesDialog(Dialog):
 		plugins_tab_index = gtknotebook.append_page(self.plugins_tab, Gtk.Label(label=_('Plugins')))
 				# T: Heading in preferences dialog
 		self.plugins_tab.show()
-		#~ print default_tab, index
-		if default_tab == "Plugins":
+		if show_tab == "Plugins" or select_plugin is not None:
 			gtknotebook.set_current_page(plugins_tab_index)
 			if not select_plugin is None:
 					self.plugins_tab.select_plugin(select_plugin)
@@ -126,7 +131,6 @@ class PreferencesDialog(Dialog):
 		# Applications tab
 		gtknotebook.append_page(ApplicationsTab(self), Gtk.Label(label=_('Applications')))
 			# T: Heading in preferences dialog
-
 
 	def _add_font_selection(self, table):
 		# need to hardcode this, cannot register it as a preference
@@ -251,6 +255,11 @@ class PluginsTab(Gtk.VBox):
 		self.configure_button.connect('clicked', self.on_configure_button_clicked)
 		hbox.pack_start(self.configure_button, False, True, 0)
 
+		self.properties_button = \
+			Gtk.Button.new_with_mnemonic(_('_Properties'))  # T: Button in plugin tab
+		hbox.pack_start(self.properties_button, False, True, 0)
+		self.properties_button.connect('clicked', self.on_properties_button_clicked)
+
 		try:
 			self.treeselection.select_path(0)
 		except:
@@ -282,29 +291,65 @@ class PluginsTab(Gtk.VBox):
 		path = selected[0].get_path(selected[1])
 
 		key, active, activatable, name, klass = treeview.get_model()[path]
-
 		self._current_plugin = key
-		logger.debug('Loading description for plugin: %s', key)
+		logger.debug('[GUI/Preferences/Plugins]: Plugin[%s] is selected.', name)
+
+		if not activatable:
+			logger.debug('[GUI/Preferences/Plugins]: Plugin[%s] is not activatable, try to load it again.', name)
+			try:
+				klass = PluginManager().load_plugin(key)
+			except Exception:
+				logger.debug("[GUI/Preferences/Plugins]: Failed to load plugin[%s] again.", name)
+				activatable = False
+			else:
+				activatable = True
+				treeview.get_model()[path][2] = activatable
+				treeview.get_model()[path][4] = klass
 
 		# Insert plugin info into textview with proper formatting
 		# TODO use our own widget with formatted text here...
 		buffer = self.textbuffer
 		def insert(text, style=None):
 			if style:
-				buffer.insert_with_tags_by_name(
-					buffer.get_end_iter(), text, style)
+				buffer.insert_with_tags_by_name(buffer.get_end_iter(), text, style)
 			else:
 				buffer.insert_at_cursor(text)
 
 		buffer.delete(*buffer.get_bounds()) # clear
+
+		check, dependencies = klass.check_dependencies() if klass else (False, [])
+
+		if not activatable:
+			# Each dependency is a 3-tuple of (name, available, required). If any
+			# dependency is required but not available we can inform the user.
+			if any(dep for dep in dependencies if not dep[1] and dep[2]):
+				insert(
+					_(
+						'This plugin cannot be enabled due to missing dependencies.\n'
+						'Please see the dependencies section below for details.\n\n'
+					), # T: help text when plugin cannot be activated
+					'red'
+				)
+			else:
+				# Dependencies are ok so there is some other reason for this plugin
+				# not being loaded. This can happen if there is a problem
+				# (e.g. syntax error) in the extension's Python module. Such issues
+				# are caught when the PluginsTreeModel is init'ed.
+				insert(_('There was a problem loading this plugin\n\n'), 'red')
+					# T: help text when plugin cannot be loaded due to bug / issue
+
+				if not klass:
+					self.configure_button.set_sensitive(False)
+					self.plugin_help_button.set_sensitive(False)
+					return
+
 		insert(_('Name') + '\n', 'bold') # T: Heading in plugins tab of preferences dialog
 		insert(klass.plugin_info['name'].strip() + '\n\n')
 		insert(_('Description') + '\n', 'bold') # T: Heading in plugins tab of preferences dialog
 		insert(klass.plugin_info['description'].strip() + '\n\n')
 		insert(_('Dependencies') + '\n', 'bold') # T: Heading in plugins tab of preferences dialog
 
-		check, dependencies = klass.check_dependencies()
-		if not(dependencies):
+		if not dependencies:
 			insert(_('No dependencies') + '\n') # T: label in plugin info in preferences dialog
 		else:
 			# Construct dependency list, missing dependencies are marked red
@@ -325,17 +370,25 @@ class PluginsTab(Gtk.VBox):
 		insert(klass.plugin_info['author'].strip())
 
 		self.configure_button.set_sensitive(active and bool(klass.plugin_preferences))
+		self.properties_button.set_sensitive(active and bool(klass.plugin_notebook_properties))
 		self.plugin_help_button.set_sensitive('help' in klass.plugin_info)
 
 	def on_help_button_clicked(self, button):
 		klass = self.plugins.get_plugin_class(self._current_plugin)
 		page = klass.plugin_info['help']
 		if page:
-			ZIM_APPLICATION.run('--manual', page)
+			application = self.get_toplevel().get_application()
+			application.open_manual(page)
 
 	def on_configure_button_clicked(self, button):
 		plugin = self.plugins[self._current_plugin]
 		PluginConfigureDialog(self.dialog, plugin).run()
+
+	def on_properties_button_clicked(self, button):
+		from zim.gui.propertiesdialog import PropertiesDialog
+		PropertiesDialog(self.dialog.main_window,
+						 self.dialog.main_window.notebook,
+						 chosen_plugin=self._current_plugin).run()
 
 	def select_plugin(self, name):
 		model = self.treeview.get_model()
@@ -358,21 +411,27 @@ class PluginsTreeModel(Gtk.ListStore):
 
 		allplugins = []
 		for key in self.plugins.list_installed_plugins():
+			klass, name, loaded = None, key, False
+
 			try:
 				klass = self.plugins.get_plugin_class(key)
 				name = klass.plugin_info['name']
-				allplugins.append((name, key, klass))
+				loaded = True
 			except:
 				logger.exception('Could not load plugin %s', key)
+			finally:
+				allplugins.append((name, key, klass, loaded))
+
 		allplugins.sort() # sort by translated name
 
-		for name, key, klass in allplugins:
+		for name, key, klass, loaded in allplugins:
 			active = key in self.plugins
 			try:
-				activatable = klass.check_dependencies_ok()
+				activatable = loaded and klass.check_dependencies_ok()
 			except:
+				activatable = False
 				logger.exception('Could not load plugin %s', name)
-			else:
+			finally:
 				self.append((key, active, activatable, name, klass))
 
 
@@ -424,13 +483,10 @@ class PluginConfigureDialog(Dialog):
 			# T: Heading for 'configure plugin' dialog - %s is the plugin name
 		self.vbox.add(label)
 
-		ignore = getattr(self.plugin, 'hide_preferences', [])
-		fields = [
-			field for field in
-				self.plugin.form_fields(self.plugin.plugin_preferences)
-					if field[0] not in ignore
-		]
-		self.add_form(fields, self.plugin.preferences)
+		self.add_form(
+			inputs=self.plugin.form_fields(self.plugin.plugin_preferences),
+			values=self.plugin.preferences
+		)
 
 		if plugin.plugin_notebook_properties:
 			hbox = Gtk.Box(spacing=12)
@@ -456,16 +512,27 @@ class ApplicationsTab(Gtk.VBox):
 	def __init__(self, dialog):
 		GObject.GObject.__init__(self)
 		self.set_border_width(5)
+		self.set_spacing(5)
 		self.dialog = dialog
 
 		button = Gtk.Button.new_with_mnemonic(_('Set default text editor'))
 			# T: button in preferences dialog to change default text editor
 		button.connect('clicked', self.on_set_texteditor)
+		self.pack_start(button, False, True, 0)
 
+		button = Gtk.Button.new_with_mnemonic(_('Set default browser'))
+			# T: button in preferences dialog to change default browser
+		button.connect('clicked', self.on_set_browser)
 		self.pack_start(button, False, True, 0)
 
 	def on_set_texteditor(self, o):
 		CustomizeOpenWithDialog(self.dialog, 'text/plain').run()
+
+	def on_set_browser(self, o):
+		CustomizeOpenWithDialog(self.dialog, 'text/html').run()
+		app = ApplicationManager.get_default_application('text/html')
+		for alt in ('x-scheme-handler/http', 'x-scheme-handler/https'):
+			ApplicationManager.set_default_application(alt, app)
 
 
 class StylesTab(Gtk.VBox):
@@ -494,13 +561,15 @@ class KeyBindingsTab(Gtk.VBox):
 		self.add(ScrolledWindow(KeyBindingTreeView()))
 		self.pack_end(help_text_factory(help), False, True, 12)
 
+
 class KeyBindingTreeView(Gtk.TreeView):
 	def __init__(self):
 		GObject.GObject.__init__(self)
 		model = Gtk.ListStore(str, int, Gdk.ModifierType) # accel_path, accel_key, accel_mods
 
 		def _append(data, accel_path, accel_key, accel_mods, changed):
-			model.append((accel_path, accel_key, accel_mods))
+			if not accel_path.endswith('_menu'):
+				model.append((accel_path, accel_key, accel_mods))
 		Gtk.AccelMap.foreach(None, _append)
 
 		model.set_sort_column_id(0, Gtk.SortType.ASCENDING)

@@ -9,6 +9,7 @@ applications defined in desktop entry files.
 
 import sys
 import os
+import re
 import logging
 import subprocess
 import locale
@@ -16,11 +17,11 @@ import locale
 from gi.repository import GObject
 from gi.repository import GLib
 
-import zim.fs
 import zim.errors
 
-from zim.fs import File, SEP
-from zim.parsing import split_quoted_strings, is_uri_re, is_win32_path_re
+from zim.fs import adapt_from_oldfs
+from zim.newfs import SEP, is_abs_filepath, FilePath, LocalFile
+from zim.parse.links import is_uri_re, is_win32_path_re
 
 
 logger = logging.getLogger('zim.applications')
@@ -70,8 +71,71 @@ def _split_environ_list(value):
 		raise ValueError
 
 
+
+_word_re = re.compile(r'''
+	(
+		"(\\"|[^"])*" |  # double quoted word
+		[^\s"]+          # word without spaces
+	)''', re.X)
+
+
+def split_quoted_strings(string):
+	'''Split a word list respecting quotes according to XDG desktop entry spec
+
+	Only supports double quotes as specified in the spec
+
+	This function always expect full words to be quoted, even if quotes
+	appear in the middle of a word, they are considered word
+	boundries.
+
+	( XDG Desktop Entry spec says full words must be quoted and
+	quotes in a word escaped, but doesn't specify what to do with
+	loose quotes in a string. Also this spec does not allow single
+	quote quotes)
+	'''
+	string = string.strip()
+	words = []
+	m = _word_re.match(string)
+	while m:
+		w = m.group(0)
+
+		words.append(w)
+		i = m.end()
+		string = string[i:].lstrip()
+		m = _word_re.match(string)
+
+	if string:
+		words += string.split() # unmatched quote ?
+
+	return [_unescape_quoted_string(w) for w in words if w]
+
+
+def _unescape_quoted_string(string):
+	# XDG Desktop entry spec says:"If an argument contains a reserved character
+	# the argument *must* be quoted."
+	# Therefore, unquoted arguments with backslash are invalid. However on
+	# Windows we may have created these, so for backward compatibility pass
+	# them through without unescaping.
+	# Unescaping here does not target \n etc. but \" and other reserved characters
+	# avoid touching alphabetic chars in case there are invalid paths in the string
+	if string[0] == '"' and string[-1] == '"':
+		return re.sub(r'\\(\W)', '\\1', string[1:-1])
+	else:
+		return string
+
+
+class ApplicationLookUpError(zim.errors.Error):
+	'''Error raised when an application is not found'''
+
+	description = None
+
+	def __init__(self, cmd):
+		self.msg = _('Cound not find application: %s') % cmd
+			# T: Error message when external application could not be found, %s is the command
+
+
 class ApplicationError(zim.errors.Error):
-	'''Error raises for error in sub process errors'''
+	'''Error raised for errors in the sub process'''
 
 	description = None
 
@@ -145,7 +209,7 @@ class Application(object):
 	@staticmethod
 	def _lookup(cmd):
 		'''Lookup cmd in PATH'''
-		if zim.fs.isabs(cmd):
+		if is_abs_filepath(cmd):
 			if os.path.isfile(cmd):
 				return cmd
 			else:
@@ -198,7 +262,7 @@ class Application(object):
 
 		# Expand home dir
 		if argv[0].startswith('~'):
-			cmd = File(argv[0]).path
+			cmd = LocalFile(argv[0]).path
 			argv = list(argv)
 			argv[0] = cmd
 
@@ -237,7 +301,7 @@ class Application(object):
 
 			p = subprocess.Popen(argv,
 				cwd=cwd,
-				stdout=open(os.devnull, 'w'),
+				stdout=subprocess.DEVNULL,
 				stderr=subprocess.PIPE,
 				startupinfo=info,
 				bufsize=4096,
@@ -247,7 +311,7 @@ class Application(object):
 			try:
 				p = subprocess.Popen(argv,
 					cwd=cwd,
-					stdout=open(os.devnull, 'w'),
+					stdout=subprocess.DEVNULL,
 					stderr=subprocess.PIPE,
 					bufsize=4096,
 					close_fds=True
@@ -256,7 +320,7 @@ class Application(object):
 				if _CAN_CALL_FLATPAK_HOST_COMMAND:
 					p = subprocess.Popen(_FLATPAK_HOSTCOMMAND_PREFIX + argv,
 						cwd=cwd,
-						stdout=open(os.devnull, 'w'),
+						stdout=subprocess.DEVNULL,
 						stderr=subprocess.PIPE,
 						bufsize=4096,
 						close_fds=True
@@ -289,8 +353,13 @@ class Application(object):
 		if TEST_MODE:
 			return TEST_MODE_RUN_CB(argv)
 
+		startupinfo = None
+		if os.name == 'nt':
+			startupinfo = subprocess.STARTUPINFO()
+			startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+			startupinfo.wShowWindow = subprocess.SW_HIDE
 		try:
-			p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
 		except OSError:
 			if _CAN_CALL_FLATPAK_HOST_COMMAND:
 				p = subprocess.Popen(_FLATPAK_HOSTCOMMAND_PREFIX + argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -307,7 +376,7 @@ class Application(object):
 			#~ raise ApplicationError(argv[0], argv[1:], p.returncode, stderr)
 		#~ elif stderr:
 		if stderr:
-			logger.warn(_decode(stderr))
+			logger.warning(_decode(stderr))
 			# TODO: allow user to get this error as well - e.g. for logging image generator cmd
 
 		text = _decode(stdout).replace('\r\n', '\n').splitlines(keepends=True)
@@ -347,6 +416,11 @@ class Application(object):
 			TEST_MODE_RUN_CB(argv)
 			return None
 
+		# https://github.com/zim-desktop-wiki/zim-desktop-wiki/issues/1697
+		def _callback_wrapper(pid, *args):
+			GLib.spawn_close_pid(pid)
+			callback(*args)
+
 		try:
 			try:
 				pid, stdin, stdout, stderr = \
@@ -368,10 +442,10 @@ class Application(object):
 				# child watch does implicit reaping -> no zombies
 				if data is None:
 					GObject.child_watch_add(pid,
-						lambda pid, status: callback(status))
+						lambda _, status: _callback_wrapper(pid, status))
 				else:
 					GObject.child_watch_add(pid,
-						lambda pid, status, data: callback(status, data), data)
+						lambda _, status, data: _callback_wrapper(pid, status, data), data)
 			return pid
 
 
@@ -408,7 +482,7 @@ class WebBrowser(Application):
 			raise NotImplementedError('WebBrowser can not handle callback')
 
 		for url in args:
-			if isinstance(url, (zim.fs.File, zim.fs.Dir)):
+			if hasattr(url, 'uri'):
 				url = url.uri
 			logger.info('Opening in webbrowser: %s', url)
 
@@ -446,13 +520,19 @@ class StartFile(Application):
 			raise NotImplementedError('os.startfile does not support a callback')
 
 		for arg in args:
-			if isinstance(arg, (zim.fs.File, zim.fs.Dir)):
+			arg = adapt_from_oldfs(arg)
+			if hasattr(arg, 'path'):
 				path = os.path.normpath(arg.path).replace('/', SEP) # msys can use '/' instead of '\\'
-			elif is_uri_re.match(arg) and not is_win32_path_re.match(arg):
+			elif is_uri_re.match(arg) and not is_win32_path_re.match(arg) and not arg.startswith('file://'):
 				# URL or e.g. mailto: or outlook: URI
 				path = str(arg)
 			else:
-				# must be file
+				# must be file as string
+				try:
+					arg = FilePath(arg).path
+				except ValueError:
+					pass
+
 				path = os.path.normpath(str(arg)).replace('/', SEP) # msys can use '/' instead of '\\'
 
 			logger.info('Opening with os.startfile: %s', path)

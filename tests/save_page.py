@@ -6,7 +6,6 @@ import tests
 from tests.pageview import setUpPageView
 from tests.mainwindow import setUpMainWindow
 
-from zim.fs import Dir
 from zim.notebook import Notebook, Path
 from zim.notebook.operations import ongoing_operation
 from zim.gui.pageview import SavePageHandler, SavePageErrorDialog, PageView
@@ -18,13 +17,13 @@ from gi.repository import Gtk
 class TestSavePageHandler(tests.TestCase):
 
 	def runTest(self):
-		dir = Dir(self.create_tmp_dir())
-		notebook = Notebook.new_from_dir(dir)
+		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
+		notebook = Notebook.new_from_dir(folder)
 		page = notebook.get_page(Path('SomePage'))
 
 		orig_store_page_1 = notebook.store_page
 		orig_store_page_2 = notebook.store_page_async
-		store_page_counter = tests.Counter()
+		store_page_counter = tests.CallBackLogger()
 
 		def wrapper1(page):
 			store_page_counter()
@@ -45,21 +44,21 @@ class TestSavePageHandler(tests.TestCase):
 		# Normal operation
 		self.assertFalse(page.modified)
 		handler.try_save_page()
-		self.assertEqual(store_page_counter.count, 0)
+		self.assertEqual(store_page_counter.numberOfCalls, 0)
 
 		self.assertFalse(page.modified)
 		handler.save_page_now()
-		self.assertEqual(store_page_counter.count, 1)
+		self.assertEqual(store_page_counter.numberOfCalls, 1)
 
-		page.modified = True
+		page.set_modified(True)
 		handler.try_save_page()
-		self.assertEqual(store_page_counter.count, 2)
+		self.assertEqual(store_page_counter.numberOfCalls, 2)
 		ongoing_operation(notebook)() # effectively a join
 		self.assertFalse(page.modified)
 
-		page.modified = True
+		page.set_modified(True)
 		handler.save_page_now()
-		self.assertEqual(store_page_counter.count, 3)
+		self.assertEqual(store_page_counter.numberOfCalls, 3)
 		self.assertFalse(page.modified)
 
 		# With errors
@@ -74,7 +73,7 @@ class TestSavePageHandler(tests.TestCase):
 		notebook.store_page = wrapper3
 		notebook.store_page_async = wrapper4
 
-		page.modified = True
+		page.set_modified(True)
 
 		def catch_dialog(dialog):
 			assert isinstance(dialog, SavePageErrorDialog)
@@ -162,7 +161,7 @@ class TestDialog(tests.TestCase):
 
 		self.page = pageview.page
 		self.pageview = pageview
-		self.handler = SavePageHandler(pageview, notebook, pageview.get_page)
+		self.handler = SavePageHandler(pageview, notebook, lambda: pageview.page)
 
 	def testCancel(self):
 
@@ -231,10 +230,10 @@ class TestNavigation(tests.TestCase):
 		def discard(dialog):
 			self.assertIsInstance(dialog, SavePageErrorDialog)
 			self.assertTrue(mainwindow.page.modified)
-			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!\n'])
+			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!'])
 			dialog.discard()
 			self.assertFalse(mainwindow.page.modified)
-			self.assertNotEqual(mainwindow.page.dump('wiki'), ['Changed!\n'])
+			self.assertNotEqual(mainwindow.page.dump('wiki'), ['Changed!'])
 
 		self.assertEqual(mainwindow.page.name, 'Test')
 
@@ -259,10 +258,10 @@ class TestNavigation(tests.TestCase):
 		def cancel(dialog):
 			self.assertIsInstance(dialog, SavePageErrorDialog)
 			self.assertTrue(mainwindow.page.modified)
-			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!\n'])
+			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!'])
 			dialog.response(Gtk.ResponseType.CANCEL)
 			self.assertTrue(mainwindow.page.modified)
-			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!\n'])
+			self.assertEqual(mainwindow.page.dump('wiki'), ['Changed!'])
 
 		self.assertEqual(mainwindow.page.name, 'Test')
 

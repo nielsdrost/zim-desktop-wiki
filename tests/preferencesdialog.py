@@ -14,8 +14,26 @@ from zim.gui.preferencesdialog import PreferencesDialog, PluginConfigureDialog
 def MyWindow():
 	from gi.repository import Gtk
 	window = Gtk.Window()
-	window.__pluginmanager__ = PluginManager()
 	return window
+
+
+class TestManual(tests.TestCase):
+
+	def runTest(self):
+		from zim.gui.mainwindow import ui_preferences as interface_preferences
+		from zim.gui.pageview import ui_preferences as pageview_preferences
+
+		with open('./data/manual/Help/Preferences.txt') as fh:
+			manual = fh.read()
+
+		for section in (interface_preferences, pageview_preferences):
+			for pref in section:
+				label = pref[3]
+				if '\n' in label:
+					label, x = label.split('\n', 1)
+					label = label.rstrip(',')
+				label = label.replace('<Primary>', '<Ctrl>').replace('<Command>', '<Ctrl>')
+				self.assertTrue(label in manual, 'Preference "%s" not documented in manual page' % label)
 
 
 class TestPreferencesDialog(tests.TestCase):
@@ -65,7 +83,7 @@ class TestPreferencesDialog(tests.TestCase):
 
 		pref_dialog = PreferencesDialog(window)
 		treeview = pref_dialog.plugins_tab.treeview
-		for name in window.__pluginmanager__.list_installed_plugins():
+		for name in PluginManager.list_installed_plugins():
 			pref_dialog.plugins_tab.select_plugin(name)
 			model, iter = treeview.get_selection().get_selected()
 			self.assertEqual(model[iter][0], name)

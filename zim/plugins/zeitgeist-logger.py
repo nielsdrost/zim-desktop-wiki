@@ -11,7 +11,8 @@ from gi.repository import Gio
 from zim.plugins import PluginClass
 from zim.notebook import NotebookExtension
 from zim.signals import SIGNAL_AFTER
-from zim.fs import File
+from zim.newfs import LocalFile
+from zim.fs import adapt_from_oldfs
 
 from zim.gui.mainwindow import MainWindowExtension
 
@@ -54,19 +55,19 @@ class ZeitgeistPlugin(PluginClass):
 		if not self.zeitgeist_client:
 			return
 
-		if not hasattr(page, 'source') \
-		or not isinstance(page.source, File):
+		source_file = adapt_from_oldfs(page.source_file)
+		if not isinstance(source_file, LocalFile):
 			return
 
-		uri = page.source.uri
-		origin = Gio.File(uri).get_parent().get_uri()
+		uri = page.source_file.uri
+		origin = page.source_file.dirname
 		text = _('Wiki page: %s') % page.name
 			# T: label for how zim pages show up in the recent files menu, %s is the page name
 
 		subject = Subject.new_for_values(mimetype='text/x-zim-wiki',
 		                                 uri=uri,
 		                                 origin=origin,
-		                                 interpretation=Interpretation.TEXT_DOCUMENT,
+		                                 interpretation=Interpretation.PLAIN_TEXT_DOCUMENT,
 		                                 manifestation=Manifestation.FILE_DATA_OBJECT,
 		                                 text=text)
 		event = Event.new_for_values(actor='application://zim.desktop',
@@ -82,9 +83,13 @@ class ZeitGeistMainWindowExtension(MainWindowExtension):
 	def __init__(self, plugin, window):
 		MainWindowExtension.__init__(self, plugin, window)
 		self.connectto(window, 'page-changed')
-		self.page = None
+		if window.page is not None:
+			self.plugin.create_and_send_event(window.page, Interpretation.ACCESS_EVENT)
+			self.page = window.page
+		else:
+			self.page = None
 
-	def on_page_changed(self, page):
+	def on_page_changed(self, pageview, page):
 		if self.page is not None:
 			self.plugin.create_and_send_event(self.page, Interpretation.LEAVE_EVENT)
 
@@ -104,10 +109,10 @@ class ZeitgeistNotebookExtension(NotebookExtension):
 		self.connectto_all(notebook,
 			('deleted-page', 'stored-page'), order=SIGNAL_AFTER)
 
-	def on_deleted_page(self, page, path):
+	def on_deleted_page(self, notebook, page):
 		logger.debug("Deleted page: %s", page.name)
 		self.plugin.create_and_send_event(page, Interpretation.DELETE_EVENT)
 
-	def on_stored_page(self, page, path):
+	def on_stored_page(self, notebook, page):
 		logger.debug("Modified page: %s", page.name)
 		self.plugin.create_and_send_event(page, Interpretation.MODIFY_EVENT)

@@ -21,7 +21,7 @@ from zim.notebook import Path, NotebookExtension
 from zim.notebook.index import IndexNotFoundError
 from zim.templates.expression import ExpressionFunction
 
-from zim.gui.pageview import PageViewExtension
+from zim.gui.notebookview import NotebookViewExtension
 from zim.gui.widgets import ScrolledWindow, \
 	WindowSidePaneWidget, LEFT_PANE, PANE_POSITIONS
 
@@ -153,17 +153,18 @@ Also adds a calendar widget to access these pages.
 			return None
 
 
-def dateRangeTemplateFunction(start, end):
+def dateRangeTemplateFunction(startdate, enddate):
 	'''Returns a function to be used in templates to iterate a range of dates'''
 
 	@ExpressionFunction
-	def date_range_function():
+	def date_range_function(first=None, last=None):
+		# first and last are integer offsets from the start
 		oneday = datetime.timedelta(days=1)
-		yield start
-		next = start + oneday
-		while next <= end:
-			yield next
-			next += oneday
+		nextdate = startdate + datetime.timedelta(days=first) if first else startdate
+		myenddate = startdate + datetime.timedelta(days=last) if last else enddate
+		while nextdate <= myenddate:
+			yield nextdate
+			nextdate += oneday
 
 	return date_range_function
 
@@ -224,15 +225,17 @@ class JournalNotebookExtension(NotebookExtension):
 		}
 
 
-class JournalPageViewExtension(PageViewExtension):
+class JournalNotebookViewExtension(NotebookViewExtension):
 	'''Extension used to add calendar dialog to mainwindow'''
 
 	def __init__(self, plugin, pageview):
-		PageViewExtension.__init__(self, plugin, pageview)
+		NotebookViewExtension.__init__(self, plugin, pageview)
 
 		self.notebook = pageview.notebook
 		self.calendar_widget = CalendarWidget(plugin, self.notebook, self.navigation)
 		self.connectto(pageview, 'page-changed', lambda o, p: self.calendar_widget.set_page(p))
+		if pageview.page is not None:
+			self.calendar_widget.set_page(pageview.page)
 
 		properties = self.plugin.notebook_properties(self.notebook)
 		self.connectto(properties, 'changed', self.on_properties_changed)
@@ -270,7 +273,8 @@ class JournalPageViewExtension(PageViewExtension):
 	def go_page_today(self):
 		today = datetime.date.today()
 		path = self.plugin.path_from_date(self.pageview.notebook, today)
-		self.navigation.open_page(path)
+		anchor = today.isoformat() # yyyy-mm-dd
+		self.navigation.open_page(path, anchor, anchor_fail_silent=True)
 
 
 class Calendar(Gtk.Calendar):
@@ -329,7 +333,7 @@ class Calendar(Gtk.Calendar):
 
 class CalendarWidget(Gtk.VBox, WindowSidePaneWidget):
 
-	title = _('Journal') # T: side pane title
+	title = _('_Journal') # T: side pane title
 
 	def __init__(self, plugin, notebook, navigation):
 		GObject.GObject.__init__(self)

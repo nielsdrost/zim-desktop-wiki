@@ -20,7 +20,7 @@ from zim.plugins import PluginClass
 from zim.plugins.base.imagegenerator import \
 	ImageGeneratorClass, BackwardImageGeneratorObjectType
 
-from zim.fs import File, TmpFile
+from zim.newfs import LocalFile, TmpFile
 from zim.config import data_file
 from zim.templates import get_template
 from zim.applications import Application
@@ -52,10 +52,11 @@ class BackwardGnuRPlotImageObjectType(BackwardImageGeneratorObjectType):
 	label = _('GNU R Plot') # T: menu item
 	syntax = 'r'
 	scriptname = 'gnu_r_plot.r'
-	imagefile_extension = '.png'
 
 
 class GNURPlotGenerator(ImageGeneratorClass):
+
+	imagefile_extension = '.png'
 
 	def __init__(self, plugin, notebook, page):
 		ImageGeneratorClass.__init__(self, plugin, notebook, page)
@@ -64,7 +65,7 @@ class GNURPlotGenerator(ImageGeneratorClass):
 
 	def generate_image(self, text):
 		plotscriptfile = self.plotscriptfile
-		pngfile = File(plotscriptfile.path[:-2] + '.png')
+		pngfile = LocalFile(plotscriptfile.path[:-2] + '.png')
 
 		plot_width = 480 # default image width (px)
 		plot_height = 480 # default image height (px)
@@ -94,8 +95,7 @@ class GNURPlotGenerator(ImageGeneratorClass):
 		# Call GNU R
 		try:
 			gnu_r = Application(gnu_r_cmd)
-			#~ gnu_r.run(args=('-f', plotscriptfile.basename, ), cwd=plotscriptfile.dir)
-			gnu_r.run(args=('-f', plotscriptfile.basename, '--vanilla'), cwd=plotscriptfile.dir)
+			gnu_r.run(args=('-f', plotscriptfile.basename, '--vanilla'), cwd=plotscriptfile.parent())
 		except:
 			return None, None # Sorry, no log
 		else:
@@ -104,4 +104,4 @@ class GNURPlotGenerator(ImageGeneratorClass):
 	def cleanup(self):
 		path = self.plotscriptfile.path
 		for path in glob.glob(path[:-2] + '.*'):
-			File(path).remove()
+			LocalFile(path).remove()

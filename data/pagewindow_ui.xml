@@ -1,0 +1,110 @@
+<ui>
+	<menubar name='menubar'>
+		<menu action='file_menu'>
+			<menuitem action='save_page'/>
+			<menuitem action='save_copy'/>
+			<separator/>
+			<menuitem action='email_page'/>
+			<placeholder name='page_plugin_items'/>
+		</menu>
+		<menu action='edit_menu'>
+			<menuitem action='undo'/>
+			<menuitem action='redo'/>
+			<separator/>
+			<menuitem action='cut'/>
+			<menuitem action='copy'/>
+			<menuitem action='paste'/>
+			<menuitem action='delete'/>
+			<separator/>
+			<menu action='checkbox_menu'>
+				<menuitem action='uncheck_checkbox'/>
+				<menuitem action='toggle_checkbox'/>
+				<menuitem action='xtoggle_checkbox'/>
+				<menuitem action='migrate_checkbox'/>
+				<menuitem action='transmigrate_checkbox'/>
+			</menu>
+			<menuitem action='edit_object'/>
+			<menuitem action='remove_link'/>
+			<separator/>
+			<placeholder name='plugin_items'/>
+			<separator/>
+			<menuitem action='copy_current_line'/>
+			<menuitem action='copy_location'/>
+		</menu>
+		<menu action='view_menu'>
+			<menuitem action='toggle_editable'/>
+			<menuitem action='toggle_panes'/>
+			<menuitem action='show_all_panes'/>
+			<menuitem action='toggle_fullscreen'/>
+			<separator/>
+			<placeholder name='plugin_items'/>
+			<separator/>
+			<menuitem action='zoom_in'/>
+			<menuitem action='zoom_out'/>
+			<menuitem action='zoom_reset'/>
+			<separator/>
+			<menuitem action='reload_page'/>
+		</menu>
+		<menu action='insert_menu'>
+			<menuitem action='insert_date'/>
+			<separator/>
+			<menuitem action='insert_bullet_list'/>
+			<menuitem action='insert_numbered_list'/>
+			<menuitem action='insert_checkbox_list'/>
+			<menuitem action='insert_line'/>
+			<separator/>
+			<menuitem action='show_insert_image'/>
+			<menuitem action='attach_file'/>
+			<placeholder name='plugin_items'/>
+			<separator/>
+			<menuitem action='insert_text_from_file'/>
+			<menu action='insert_new_file_menu'>
+				<separator/>
+				<menuitem action='open_file_templates_folder'/>
+			</menu>
+			<menuitem action='insert_link'/>
+		</menu>
+		<menu action='format_menu'>
+			<menuitem action='apply_format_h1'/>
+			<menuitem action='apply_format_h2'/>
+			<menuitem action='apply_format_h3'/>
+			<menuitem action='apply_format_h4'/>
+			<menuitem action='apply_format_h5'/>
+			<separator/>
+			<menuitem action='apply_format_bullet_list'/>
+			<menuitem action='apply_format_numbered_list'/>
+			<menuitem action='apply_format_checkbox_list'/>
+			<separator/>
+			<menuitem action='apply_format_strong'/>
+			<menuitem action='apply_format_emphasis'/>
+			<menuitem action='apply_format_mark'/>
+			<menuitem action='apply_format_strike'/>
+			<menuitem action='apply_format_code'/>
+			<menuitem action='apply_format_sub'/>
+			<menuitem action='apply_format_sup'/>
+			<separator/>
+			<menuitem action='clear_formatting'/>
+		</menu>
+		<menu action='search_menu'>
+			<menuitem action='show_find'/>
+			<menuitem action='find_next'/>
+			<menuitem action='find_previous'/>
+			<menuitem action='show_find_and_replace'/>
+		</menu>
+		<menu action='tools_menu'>
+			<menuitem action='show_word_count'/>
+			<placeholder name='page_tools'/>
+			<separator/>
+			<menuitem action='open_attachments_folder'/>
+			<separator/>
+			<placeholder name='plugin_items'/>
+			<separator/>
+			<menuitem action='edit_page_source'/>
+		</menu>
+	</menubar>
+	<accelerator action='zoom_in_alt1'/>
+	<accelerator action='show_find_alt1'/>
+	<accelerator action='find_next_alt1'/>
+	<accelerator action='find_previous_alt1'/>
+	<accelerator action='redo_alt1'/>
+</ui>

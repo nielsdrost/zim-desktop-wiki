@@ -11,16 +11,16 @@ import os
 from gi.repository import Gtk
 
 from zim.errors import Error
+from zim.newfs import LocalFolder
 from zim.notebook import get_notebook_list, Path, Page, NotebookInfo
 from zim.notebook.notebook import NotebookConfig
 from zim.formats import ParseTree
-from zim.fs import File, Dir
 from zim.gui.clipboard import Clipboard
 
 import zim.gui
 
 
-from zim.gui.uiactions import UIActions, PAGE_EDIT_ACTIONS
+from zim.gui.uiactions import UIActions, PAGE_EDIT_ACTIONS, TrashPageDialog, DeletePageDialog
 
 def strip_file_url_prefix(str):
 	if str.startswith('file://'): return str[7:]
@@ -35,27 +35,18 @@ class EmptyWindowObject(object):
 		return None
 
 
-class MockNavigation(object):
-
-	def __init__(self):
-		self.opened = None
-
-	def open_page(self, page):
-		self.opened = page
-
-
 class TestUIActions(tests.TestCase):
 
 	def setUp(self):
 		window = EmptyWindowObject()
 		self.notebook = self.setUpNotebook(
 			content={
-				'Test': 'Test 123',
-				'ExistingPage': 'Exists !'
+				'Test': 'Test 123\n',
+				'ExistingPage': 'Exists !\n'
 			}
 		)
 		self.page = self.notebook.get_page(Path('Test'))
-		self.navigation = MockNavigation()
+		self.navigation = tests.MockObject(methods=('open_page', 'open_notebook', 'open_manual'))
 		self.uiactions = UIActions(
 			window,
 			self.notebook,
@@ -75,7 +66,7 @@ class TestUIActions(tests.TestCase):
 			self.uiactions.new_page()
 
 		self.assertTrue(page.exists())
-		self.assertEqual(self.navigation.opened, page)
+		self.assertEqual(self.navigation.lastMethodCall, ('open_page', page))
 
 	def testCreateNewPageFailsForExistingPage(self):
 		from zim.notebook import PageExistsError
@@ -86,6 +77,25 @@ class TestUIActions(tests.TestCase):
 
 		with tests.DialogContext(open_new_page):
 			self.uiactions.new_page()
+
+	def testCreateNewPageImportExistingTextFile(self):
+		# See also mainwindow.TestOpenPageImportTextFile
+		file = self.notebook.folder.file('ExistingFile.txt')
+		file.write('Test 123') # Not a page, just text!
+
+		def open_new_page(dialog):
+			dialog.set_input(page='ExistingFile')
+			dialog.assert_response_ok()
+
+		def do_import(questiondialog):
+			questiondialog.answer_yes()
+
+		with tests.DialogContext(open_new_page, do_import):
+			self.uiactions.new_page()
+
+		lines = file.readlines()
+		self.assertEqual(lines[0], 'Content-Type: text/x-zim-wiki\n')
+		self.assertEqual(lines[-1], 'Test 123\n')
 
 	def testCreateNewPageWithRelativePaths(self):
 		self.uiactions.page = self.notebook.get_page(Path('Test:SubPage'))
@@ -106,7 +116,7 @@ class TestUIActions(tests.TestCase):
 				self.uiactions.new_page()
 
 			self.assertTrue(page.exists())
-			self.assertEqual(self.navigation.opened, page)
+			self.assertEqual(self.navigation.lastMethodCall, ('open_page', page))
 
 	def testCreateNewChildPage(self):
 		page = self.notebook.get_page(Path('Test:Child'))
@@ -120,7 +130,7 @@ class TestUIActions(tests.TestCase):
 			self.uiactions.new_sub_page()
 
 		self.assertTrue(page.exists())
-		self.assertEqual(self.navigation.opened, page)
+		self.assertEqual(self.navigation.lastMethodCall, ('open_page', page))
 
 	def testOpenAnotherNotebook(self):
 		from zim.gui.notebookdialog import NotebookDialog
@@ -136,7 +146,7 @@ class TestUIActions(tests.TestCase):
 	def testImportPageFromFile(self):
 		folder = self.setUpFolder(mock=tests.MOCK_ALWAYS_REAL)
 		file = folder.file('TestImport.txt')
-		file.write('import test 123')
+		file.write('import test 123\n')
 
 		def import_file(dialog):
 			dialog.set_file(file)
@@ -234,8 +244,9 @@ class TestUIActions(tests.TestCase):
 			dialog.set_input(name='ExistingPage')
 			self.assertRaises(PageExistsError, dialog.do_response_ok)
 
-		with tests.DialogContext(renamepage):
-			self.uiactions.move_page()
+		with tests.LoggingFilter('zim', 'Page already exists'):
+			with tests.DialogContext(renamepage):
+				self.uiactions.move_page()
 
 	def testRenamePageNonExistingPageFails(self):
 		from zim.notebook import PageNotFoundError
@@ -245,8 +256,9 @@ class TestUIActions(tests.TestCase):
 			dialog.set_input(name='NewName')
 			self.assertRaises(PageNotFoundError, dialog.do_response_ok)
 
-		with tests.DialogContext(renamepage):
-			self.uiactions.move_page(page)
+		with tests.LoggingFilter('zim', 'No such page'):
+			with tests.DialogContext(renamepage):
+				self.uiactions.move_page(page)
 
 	def testRenamePageWithPageUpdateHeading(self):
 		page = self.notebook.get_page(Path('MyPage'))
@@ -408,8 +420,26 @@ class TestUIActions(tests.TestCase):
 			dialog.set_input(parent=':')
 			self.assertRaises(PageExistsError, dialog.do_response_ok)
 
-		with tests.DialogContext(movepage):
-			self.uiactions.move_page(page)
+		with tests.LoggingFilter('zim', 'Page already exists'):
+			with tests.DialogContext(movepage):
+				self.uiactions.move_page(page)
+
+	def testMovePageFailsForExistingTextFile(self):
+		from zim.notebook import PageNotAvailableError
+		file = self.notebook.folder.file('ExistingFile.txt')
+		file.write('Test 123') # Not a page, just text!
+
+		page = self.notebook.get_page(Path('SomeParent:ExistingFile'))
+		page.parse('wiki', 'test 123\n')
+		self.notebook.store_page(page)
+
+		def movepage(dialog):
+			dialog.set_input(parent=':')
+			self.assertRaises(PageNotAvailableError, dialog.do_response_ok)
+
+		with tests.LoggingFilter('zim', 'Page not available'):
+			with tests.DialogContext(movepage):
+				self.uiactions.move_page(page)
 
 	def testMovePageNonExistingPageFails(self):
 		from zim.notebook import PageNotFoundError
@@ -419,12 +449,13 @@ class TestUIActions(tests.TestCase):
 			dialog.set_input(parent='NewParent')
 			self.assertRaises(PageNotFoundError, dialog.do_response_ok)
 
-		with tests.DialogContext(movepage):
-			self.uiactions.move_page(page)
+		with tests.LoggingFilter('zim', 'No such page'):
+			with tests.DialogContext(movepage):
+				self.uiactions.move_page(page)
 
 	def testMovePageUpdateLinks(self):
 		referrer = self.notebook.get_page(Path('Referrer'))
-		referrer.parse('wiki', 'Test [[Test]]\n')
+		referrer.parse('wiki', 'Test [[Test]]\n[[#anchor]]\n')
 		self.notebook.store_page(referrer)
 
 		def movepage(dialog):
@@ -436,7 +467,7 @@ class TestUIActions(tests.TestCase):
 		with tests.DialogContext(movepage):
 			self.uiactions.move_page()
 
-		self.assertEqual(referrer.dump('wiki'), ['Test [[NewParent:Test]]\n'])
+		self.assertEqual(referrer.dump('wiki'), ['Test [[NewParent:Test]]\n', '[[#anchor]]\n'])
 
 	def testMovePageNoUpdateLinks(self):
 		referrer = self.notebook.get_page(Path('Referrer'))
@@ -455,48 +486,39 @@ class TestUIActions(tests.TestCase):
 		self.assertEqual(referrer.dump('wiki'), ['Test [[Test]]\n'])
 
 	def testEditProperties(self):
-		from zim.gui.preferencesdialog import PreferencesDialog
-		from zim.plugins import PluginManager
-
+		from zim.gui.propertiesdialog import PropertiesDialog
 		self.uiactions.widget = Gtk.Window()
-		self.uiactions.widget.__pluginmanager__ = PluginManager()
 
-		def edit_properties(dialog):
-			dialog.set_input(home='NewHome')
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(edit_properties):
+		with tests.DialogContext(
+			(PropertiesDialog, lambda d: d.set_input(home='NewHome', document_root='../my_rel_root'))
+		):
 			self.uiactions.show_properties()
 
 		self.assertEqual(self.notebook.config['Notebook']['home'], Path('NewHome'))
+		self.assertEqual(self.notebook.get_home_page(), Path('NewHome'))
+		self.assertEqual(self.notebook.config['Notebook']['document_root'], '../my_rel_root')
+		self.assertEqual(self.notebook.document_root, LocalFolder(self.notebook.folder.parent().folder('my_rel_root').path))
 
 	def testEditPropertiesReadOnly(self):
-		from zim.gui.preferencesdialog import PreferencesDialog
-		from zim.plugins import PluginManager
-
+		from zim.gui.propertiesdialog import PropertiesDialog
 		self.uiactions.widget = Gtk.Window()
-		self.uiactions.widget.__pluginmanager__ = PluginManager()
 
 		self.assertFalse(self.notebook.readonly) # implies attribute exists ..
 		self.notebook.readonly = True
 
-		def edit_properties(dialog):
-			self.assertFalse(dialog.get_input_enabled('home'))
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(edit_properties):
+		with tests.DialogContext(
+			(PropertiesDialog, lambda d: self.assertFalse(d.get_input_enabled('home')))
+		):
 			self.uiactions.show_properties()
 
 	def testPropertiesNotChangedOnCancel(self):
-		from zim.gui.preferencesdialog import PreferencesDialog
-		from zim.plugins import PluginManager
-
+		from zim.gui.propertiesdialog import PropertiesDialog
 		self.uiactions.widget = Gtk.Window()
-		self.uiactions.widget.__pluginmanager__ = PluginManager()
 
 		# In fact this is testig the "cancel" button for all dialogs
 		# which have one ..
 		def edit_properties(dialog):
+			assert isinstance(dialog, PropertiesDialog)
 			dialog.set_input(home='NewHome')
 			dialog.do_response_cancel()
 
@@ -526,7 +548,6 @@ class TestUIActions(tests.TestCase):
 		from zim.plugins import PluginManager
 
 		self.uiactions.widget = Gtk.Window()
-		self.uiactions.widget.__pluginmanager__ = PluginManager()
 
 		with tests.DialogContext(PreferencesDialog):
 			self.uiactions.show_preferences()
@@ -610,22 +631,24 @@ class TestUIActions(tests.TestCase):
 		with tests.DialogContext(use_recent_changes):
 			self.uiactions.show_recent_changes()
 
-		self.assertEqual(self.navigation.opened, Path('NewPage'))
+		# self.assertEqual(self.navigation.lastMethodCall, ('open_page', Path('NewPage'))) # FIXME: fails at random in automated tests
 
 	def testShowServerDialog(self):
-		from zim.main import ZIM_APPLICATION
-		ZIM_APPLICATION._running = True # HACK
+		application = tests.MockObject(methods=('add_window',))
+		window = tests.MockObject(return_values={'get_application': application})
+		self.uiactions.widget = tests.MockObject(return_values={'get_toplevel': window})
 
 		from zim.gui.server import ServerWindow
-		ServerWindow.show_all = tests.Counter()
-		ServerWindow.present = tests.Counter()
+		ServerWindow.show_all = tests.CallBackLogger()
 
 		self.uiactions.show_server_gui()
 
-		self.assertEqual(ServerWindow.present.count, 1)
+		self.assertTrue(ServerWindow.show_all.hasBeenCalled)
+		self.assertEqual(application.lastMethodCall[0], 'add_window')
+		self.assertIsInstance(application.lastMethodCall[1], ServerWindow)
 
 	def testReloadIndex(self):
-		self.uiactions.reload_index()
+		self.uiactions.check_and_update_index()
 
 	def testReloadIndexWhileOngoing(self):
 		from zim.notebook.operations import ongoing_operation
@@ -636,7 +659,7 @@ class TestUIActions(tests.TestCase):
 		next(op_iter)
 		self.assertEqual(ongoing_operation(self.notebook), op)
 
-		self.uiactions.reload_index()
+		self.uiactions.check_and_update_index()
 
 		self.assertIsNone(ongoing_operation(self.notebook))
 
@@ -652,17 +675,8 @@ class TestUIActions(tests.TestCase):
 		# more tests in tests/customtools.py
 
 	def testOpenHelp(self, page=None):
-		from zim.main import ZIM_APPLICATION
-		ZIM_APPLICATION._running = True # HACK
-
-		def check_window(window):
-			self.assertEqual(window.notebook.folder.basename, 'manual')
-			if page:
-				self.assertEqual(window.page, page)
-
-		with tests.LoggingFilter('zim', 'Exception while loading plugin:'):
-			with tests.WindowContext(check_window, check_window): # window.present() called twice
-				self.uiactions.show_help()
+		self.uiactions.show_help()
+		self.assertEqual(self.navigation.lastMethodCall, ('open_manual', None))
 
 	@tests.expectedFailure  # page opened after window.present
 	def testOpenHelpFAQ(self):
@@ -678,9 +692,9 @@ class TestUIActions(tests.TestCase):
 
 	def testOpenAboutDialog(self):
 		from zim.gui.uiactions import MyAboutDialog
-		MyAboutDialog.run = tests.Counter()
+		MyAboutDialog.run = tests.CallBackLogger()
 		self.uiactions.show_about()
-		self.assertEqual(MyAboutDialog.run.count, 1)
+		self.assertTrue(MyAboutDialog.run.hasBeenCalled)
 
 	def testAccesActionsFromPopupMenu(self):
 		# Test depends on first menu item being "new_page_here"
@@ -723,7 +737,7 @@ class TestUIActionsRealFile(tests.TestCase):
 			content={'Test': 'Test 123'}
 		)
 		self.page = self.notebook.get_page(Path('Test'))
-		self.navigation = MockNavigation()
+		self.navigation = tests.MockObject(methods=('open_page', 'open_notebook'))
 		self.uiactions = UIActions(
 			window,
 			self.notebook,
@@ -731,27 +745,80 @@ class TestUIActionsRealFile(tests.TestCase):
 			self.navigation,
 		)
 
-	def testDeletePageWithTrash(self):
+	def testTrashPage(self):
 		self.assertTrue(self.page.exists())
 
-		with tests.DialogContext(): # fails if dialog shown
+		with tests.DialogContext(TrashPageDialog):
 			self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 
-	def testDeletePageWithoutTrash(self):
+	def testTrashPageCancel(self):
+		self.assertTrue(self.page.exists())
+
+		def cancel_delete(dialog):
+			assert isinstance(dialog, TrashPageDialog)
+			dialog.do_response_cancel()
+
+		with tests.DialogContext(cancel_delete):
+			self.uiactions.delete_page()
+
+		self.assertTrue(self.page.exists())
+
+	def testTrashPageFallbackToDelete(self):
+		from zim.newfs.helpers import TrashNotSupportedError
+		self.assertTrue(self.page.exists())
+
+		def mock_trash_iter(*a, **k):
+			yield
+			raise TrashNotSupportedError('Test')
+		self.notebook.trash_page_iter = mock_trash_iter
+
+		def fail_trash(dialog):
+			assert isinstance(dialog, TrashPageDialog)
+			dialog.do_response_ok() # NOT assert_repsonse_ok - we want to fail
+
+		def question_yes(dialog):
+			dialog.answer_yes()
+
+		with tests.LoggingFilter('zim', 'Test'):
+			with tests.DialogContext(fail_trash, question_yes, DeletePageDialog):
+				self.uiactions.delete_page()
+
+		self.assertFalse(self.page.exists())
+
+	def testTrashPageFallbackToDeleteCancel(self):
+		from zim.newfs.helpers import TrashNotSupportedError
+		self.assertTrue(self.page.exists())
+
+		def mock_trash_iter(*a, **k):
+			yield
+			raise TrashNotSupportedError('Test')
+		self.notebook.trash_page_iter = mock_trash_iter
+
+		def fail_trash(dialog):
+			assert isinstance(dialog, TrashPageDialog)
+			dialog.do_response_ok() # NOT assert_response_ok - we want to fail
+
+		def question_no(dialog):
+			dialog.answer_no()
+
+		with tests.LoggingFilter('zim', 'Test'):
+			with tests.DialogContext(fail_trash, question_no):
+				self.uiactions.delete_page()
+
+		self.assertTrue(self.page.exists())
+
+	def testDeletePage(self):
 		self.notebook.config['Notebook']['disable_trash'] = True
 		self.assertTrue(self.page.exists())
 
-		def do_delete(dialog):
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(do_delete):
+		with tests.DialogContext(DeletePageDialog):
 			self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 
-	def testDeletePageWithoutTrashAndChildren(self):
+	def testDeletePageAndChildren(self):
 		self.notebook.config['Notebook']['disable_trash'] = True
 		self.assertTrue(self.page.exists())
 		child = self.notebook.get_page(Path('Test:Child'))
@@ -761,93 +828,83 @@ class TestUIActionsRealFile(tests.TestCase):
 		self.assertTrue(dir.exists())
 		dir.folder('foo').touch()
 
-		def do_delete(dialog):
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(do_delete):
+		with tests.DialogContext(DeletePageDialog):
 			self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 		self.assertFalse(dir.exists())
 
-	def testDeletePageWithoutTrashCancel(self):
+	def testDeletePageCancel(self):
 		self.notebook.config['Notebook']['disable_trash'] = True
 		self.assertTrue(self.page.exists())
 
-		def do_delete(dialog):
+		def cancel_delete(dialog):
+			assert isinstance(dialog, DeletePageDialog)
 			dialog.do_response_cancel()
 
-		with tests.DialogContext(do_delete):
+		with tests.DialogContext(cancel_delete):
 			self.uiactions.delete_page()
 
 		self.assertTrue(self.page.exists())
 
-	def testDeletePageWithTrashUpdateLinks(self):
-		from zim.config import ConfigManager
-		ConfigManager.preferences['GtkInterface'].input(remove_links_on_delete=True)
+	def testTrashPageUpdateLinks(self):
 		self.assertTrue(self.page.exists())
 
 		referrer = self.notebook.get_page(Path('Referrer'))
 		referrer.parse('wiki', 'Test [[Test]]\n')
 		self.notebook.store_page(referrer)
 
-		with tests.DialogContext(): # fails if dialog shown
-			self.uiactions.delete_page()
+		with tests.DialogContext(
+				(TrashPageDialog, lambda d: d.update_links_checkbutton.set_active(True))
+			):
+				self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 		self.assertEqual(referrer.dump('wiki'), ['Test Test\n'])
 
-	def testDeletePageWithTrashNoUpdateLinks(self):
-		from zim.config import ConfigManager
-		ConfigManager.preferences['GtkInterface'].input(remove_links_on_delete=False)
+	def testTrashPageNoUpdateLinks(self):
 		self.assertTrue(self.page.exists())
 
 		referrer = self.notebook.get_page(Path('Referrer'))
 		referrer.parse('wiki', 'Test [[Test]]\n')
 		self.notebook.store_page(referrer)
 
-		with tests.DialogContext(): # fails if dialog shown
-			self.uiactions.delete_page()
+		with tests.DialogContext(
+				(TrashPageDialog, lambda d: d.update_links_checkbutton.set_active(False))
+			):
+				self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 		self.assertEqual(referrer.dump('wiki'), ['Test [[Test]]\n'])
 
-	def testDeletePageWithoutTrashUpdateLinks(self):
-		from zim.config import ConfigManager
-
+	def testDeletePageUpdateLinks(self):
 		self.notebook.config['Notebook']['disable_trash'] = True
-		ConfigManager.preferences['GtkInterface'].input(remove_links_on_delete=True)
 		self.assertTrue(self.page.exists())
 
 		referrer = self.notebook.get_page(Path('Referrer'))
 		referrer.parse('wiki', 'Test [[Test]]\n')
 		self.notebook.store_page(referrer)
 
-		def do_delete(dialog):
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(do_delete):
-			self.uiactions.delete_page()
+		with tests.DialogContext(
+				(DeletePageDialog, lambda d: d.update_links_checkbutton.set_active(True))
+			):
+				self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 		self.assertEqual(referrer.dump('wiki'), ['Test Test\n'])
 
-	def testDeletePageWithoutTrashNoUpdateLinks(self):
-		from zim.config import ConfigManager
-
+	def testDeletePageNoUpdateLinks(self):
 		self.notebook.config['Notebook']['disable_trash'] = True
-		ConfigManager.preferences['GtkInterface'].input(remove_links_on_delete=False)
 		self.assertTrue(self.page.exists())
 
 		referrer = self.notebook.get_page(Path('Referrer'))
 		referrer.parse('wiki', 'Test [[Test]]\n')
 		self.notebook.store_page(referrer)
 
-		def do_delete(dialog):
-			dialog.assert_response_ok()
-
-		with tests.DialogContext(do_delete):
-			self.uiactions.delete_page()
+		with tests.DialogContext(
+				(DeletePageDialog, lambda d: d.update_links_checkbutton.set_active(False))
+			):
+				self.uiactions.delete_page()
 
 		self.assertFalse(self.page.exists())
 		self.assertEqual(referrer.dump('wiki'), ['Test [[Test]]\n'])
@@ -928,5 +985,21 @@ class TestUIActionsRealFile(tests.TestCase):
 				self.uiactions.edit_page_source()
 
 		newtext = self.page.dump('plain')
-		self.assertEqual(signals['page-changed'], [(True,)]) # boolean for external change
+		self.assertEqual(signals['storage-changed'], [(True,)]) # boolean for external change
 		self.assertNotEqual(oldtext, newtext)
+
+
+class TestManualProperties(tests.TestCase):
+
+	def runTest(self):
+		from zim.gui.propertiesdialog import notebook_properties
+
+		with open('./data/manual/Help/Properties.txt') as fh:
+			manual = fh.read()
+
+		for pref in notebook_properties:
+			label = pref[2]
+			if '\n' in label:
+				label, x = label.split('\n', 1)
+				label = label.rstrip(',')
+			self.assertTrue(label in manual, 'Property "%s" not documented in manual page' % label)

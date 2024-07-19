@@ -7,6 +7,7 @@ import logging
 
 logger = logging.getLogger('zim.plugins.sourceview')
 
+import weakref
 
 # This plugin can work without GUI for just the export
 # Be nice about gtk, since it may not be present in a server CLI only version
@@ -18,18 +19,24 @@ except:
 
 try:
 	import gi
-	gi.require_version('GtkSource', '3.0')
+
+	# Allow using GtkSourceView 4.x (requires Gtk 3.24) for systems that no
+	# longer provide 3.x.
+	try:
+		gi.require_version('GtkSource', '3.0')
+	except:
+		gi.require_version('GtkSource', '4')
+
 	from gi.repository import GtkSource
 except:
 	GtkSource = None
 
 from zim.plugins import PluginClass, InsertedObjectTypeExtension, PLUGIN_FOLDER
 from zim.actions import action
-from zim.utils import WeakSet
-from zim.config import String, Boolean
+from zim.config import String, Boolean, ConfigManager
 from zim.formats.html import html_encode
 
-from zim.gui.widgets import Dialog, ScrolledWindow
+from zim.gui.widgets import Dialog, InputEntry, ScrolledWindow
 from zim.gui.insertedobjects import TextViewWidget
 
 if GtkSource:
@@ -37,14 +44,14 @@ if GtkSource:
 	lang_ids = lm.get_language_ids()
 	lang_names = [lm.get_language(i).get_name() for i in lang_ids]
 
-	LANGUAGES = dict((lm.get_language(i).get_name(), i) for i in lang_ids)
+	LANGUAGES = dict((lm.get_language(i).get_name(), i) for i in lang_ids if not lm.get_language(i).get_hidden())
 
 	ssm = GtkSource.StyleSchemeManager()
 
 	# add an optional path in PLUGIN_FOLDER  where the user can set his
 	# custom styles
 	plugin_name = __name__.split('.')[-1]
-	ssm.append_search_path(PLUGIN_FOLDER.subdir(plugin_name).path)
+	ssm.append_search_path(PLUGIN_FOLDER.folder(plugin_name).path)
 	# ~ print(ssm.get_search_path())
 
 	STYLES = ssm.get_scheme_ids()
@@ -89,6 +96,8 @@ shown as embedded widgets with syntax highlighting, line numbers etc.
 			# T: preference option for sourceview plugin
 		('tab_width', 'int', _('Tab width'), 4, (1, 80)),
 			# T: preference option for sourceview plugin
+		('border_width', 'int', _('Border width'), 3, (1, 20)),
+			# T: preference option for sourceview plugin
 		('wrap_mode', 'choice', _('Text wrap mode'), WRAP_WORD_CHAR, (WRAP_NONE, WRAP_WORD_CHAR, WRAP_CHAR, WRAP_WORD)),
 			# T: preference option for sourceview plugin
 		('theme', 'choice', _('Theme'), STYLES[0] if STYLES else 'not found',
@@ -114,17 +123,22 @@ class SourceViewObjectType(InsertedObjectTypeExtension):
 	}
 
 	def __init__(self, plugin, objmap):
-		self._widgets = WeakSet()
+		self._widgets = weakref.WeakSet()
 		self.preferences = plugin.preferences
-		InsertedObjectTypeExtension.__init__(self, plugin, objmap)
+		super().__init__(plugin, objmap)
 		self.connectto(self.preferences, 'changed', self.on_preferences_changed)
 
 	def new_model_interactive(self, parent, notebook, page):
-		lang, linenumbers = InsertCodeBlockDialog(parent).run()
-		if lang is None:
+		result = InsertCodeBlockDialog(parent).run()
+		if result is None:
 			raise ValueError # dialog cancelled
 		else:
-			attrib = self.parse_attrib({'lang': lang, 'linenumbers': linenumbers})
+			id, lang, linenumbers = result
+			attrib = self.parse_attrib({
+				'id': id,
+				'lang': lang,
+				'linenumbers': linenumbers
+			})
 			return SourceViewBuffer(attrib, '')
 
 	def model_from_data(self, notebook, page, attrib, text):
@@ -142,6 +156,30 @@ class SourceViewObjectType(InsertedObjectTypeExtension):
 	def on_preferences_changed(self, preferences):
 		for widget in self._widgets:
 			widget.set_preferences(preferences)
+
+	def format_markdown(self, dumper, attrib, data):
+		# Output "fenced code blocks" for markdown
+		# following gfm spec on how these work
+		info = attrib['lang']
+		lines = data.splitlines(True)
+		# find appropriate fence..
+		for i in range(3, 10):
+			fence = ('`' * i) + '\n'
+			if fence not in lines:
+				break
+			fence = ('~' * i) + '\n'
+			if fence not in lines:
+				break
+		else:
+			# we give up, just indent it
+			return ['\t' + l for l in lines]
+
+		return [
+			fence[:-1] + info + '\n',
+			data,
+			fence
+		]
+
 
 	def format_html(self, dumper, attrib, data):
 		# to use highlight.js add the following to your template:
@@ -173,6 +211,7 @@ else:
 class SourceViewBuffer(_bufferclass):
 
 	def __init__(self, attrib, text):
+		#logger.debug("SourceViewBuffer attrib=%r", attrib)
 		GtkSource.Buffer.__init__(self)
 		self.set_highlight_matching_brackets(True)
 		if attrib['lang']:
@@ -215,7 +254,6 @@ class SourceViewWidget(TextViewWidget):
 
 		self.view = GtkSource.View()
 		self.view.set_buffer(self.buffer)
-		self.view.modify_font(Pango.FontDescription('monospace'))
 		self.view.set_auto_indent(True)
 		self.view.set_smart_home_end(True)
 		self.view.set_highlight_current_line(True)
@@ -224,6 +262,7 @@ class SourceViewWidget(TextViewWidget):
 		self.view.set_tab_width(4)
 		self.view.set_show_line_numbers(self.buffer.object_attrib['linenumbers'])
 		self.view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+		self.view.set_border_width(3)
 
 		self.WRAP_MODE = {
 			WRAP_NONE: Gtk.WrapMode.NONE,
@@ -231,6 +270,14 @@ class SourceViewWidget(TextViewWidget):
 			WRAP_CHAR: Gtk.WrapMode.CHAR,
 			WRAP_WORD: Gtk.WrapMode.WORD,
 		}
+
+		text_style = ConfigManager.get_config_dict('style.conf')
+		try:
+			font = text_style['Tag code']['family']
+		except KeyError:
+			font = 'monospace'
+		finally:
+			self.view.modify_font(Pango.FontDescription(font))
 
 		# simple toolbar
 		#~ bar = Gtk.HBox() # FIXME: use Gtk.Toolbar stuff
@@ -282,6 +329,7 @@ class SourceViewWidget(TextViewWidget):
 		self.view.set_right_margin_position(preferences['right_margin_position'])
 		self.view.set_show_right_margin(preferences['show_right_margin'])
 		self.view.set_tab_width(preferences['tab_width'])
+		self.view.set_border_width(preferences['border_width'])
 		self.view.set_wrap_mode(self.WRAP_MODE[preferences['wrap_mode']])
 
 	def on_attrib_changed(self, attrib):
@@ -321,54 +369,90 @@ class InsertCodeBlockDialog(Dialog):
 
 	def __init__(self, parent):
 		Dialog.__init__(self, parent, _('Insert Code Block')) # T: dialog title
-		self.result = (None, None)
+		self.uistate.define(id=String(None))
 		self.uistate.define(lang=String(None))
 		self.uistate.define(line_numbers=Boolean(True))
-		defaultlang = self.uistate['lang']
 
+		grid = Gtk.Grid()
+		grid.set_column_spacing(5)
+		grid.set_row_spacing(5)
+
+		label = Gtk.Label(_('Syntax') + ':') # T: input label
+		grid.add(label)
+
+		self.combobox = Gtk.ComboBox.new_with_model_and_entry(self.init_combobox_model())
+		self.combobox.set_entry_text_column(0)
+		entry = self.combobox.get_child()
+		entry.set_activates_default(True)  # Pressing enter will activate the default button (here: ok-button)
+
+		completion = Gtk.EntryCompletion()
+		completion.set_model(self.init_autocomplete_model())
+		completion.set_text_column(0)
+		completion.set_minimum_key_length(0)
+		entry.set_completion(completion)
+
+		defaultlang = self.init_default_language()
+		if defaultlang:
+			entry.set_text(defaultlang)
+
+		self.combobox.connect("changed", self.on_combobox_changed)
+
+		grid.attach(self.combobox, 1, 0, 1, 1)
+
+		label = Gtk.Label(_('Id') + ':') # T: input label for object ID
+		grid.attach(label, 0, 1, 1, 1)
+		self.entry = InputEntry()
+		grid.attach(self.entry, 1, 1, 1, 1)
+
+		self.checkbox = Gtk.CheckButton(_('Display line numbers')) # T: input checkbox
+		self.checkbox.set_active(self.uistate['line_numbers'])
+		grid.attach(self.checkbox, 1, 2, 1, 1)
+
+		self.vbox.add(grid)
+
+		# Set ok button as default.
+		self.btn_ok = self.get_widget_for_response(response_id=Gtk.ResponseType.OK)
+		self.btn_ok.set_can_default(True)
+		self.btn_ok.grab_default()
+		self.btn_ok.set_sensitive(defaultlang is not None)
+
+	def init_default_language(self):
+		for lang in sorted(LANGUAGES, key=lambda k: k.lower()):
+			if LANGUAGES[lang] == self.uistate['lang']:
+				return lang
+		return None
+
+	def init_combobox_model(self):
 		menu = {}
 		for l in sorted(LANGUAGES, key=lambda k: k.lower()):
 			key = l[0].upper()
 			if not key in menu:
 				menu[key] = []
 			menu[key].append(l)
-
 		model = Gtk.TreeStore(str)
-		defaultiter = None
 		for key in sorted(menu):
 			iter = model.append(None, [key])
 			for lang in menu[key]:
-				myiter = model.append(iter, [lang])
-				if LANGUAGES[lang] == defaultlang:
-					defaultiter = myiter
+				model.append(iter, [lang])
+		return model
 
-		hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-		hbox.set_spacing(5)
-		label = Gtk.Label(_('Syntax') +':') # T: input label
-		hbox.add(label)
+	def init_autocomplete_model(self):
+		store = Gtk.TreeStore(str)
+		for lang in sorted(LANGUAGES, key=lambda k: k.lower()):
+			store.append(None, [lang])
+		return store
 
-		combobox = Gtk.ComboBox.new_with_model(model)
-		renderer_text = Gtk.CellRendererText()
-		combobox.pack_start(renderer_text, True)
-		combobox.add_attribute(renderer_text, "text", 0)
-		if defaultiter is not None:
-			combobox.set_active_iter(defaultiter)
-		hbox.add(combobox)
-		self.combobox = combobox
-		self.vbox.add(hbox)
-		self.checkbox = Gtk.CheckButton(_('Display line numbers')) # T: input checkbox
-		self.checkbox.set_active(self.uistate['line_numbers'])
-		self.vbox.add(self.checkbox)
+	def on_combobox_changed(self, widget):
+		""" Checks whether the text entry in combobox is valid and enables/disables the ok-button. """
+		self.btn_ok = self.get_widget_for_response(response_id=Gtk.ResponseType.OK)
+		self.btn_ok.set_sensitive(widget.get_child().get_text() in LANGUAGES)
 
 	def do_response_ok(self):
-		model = self.combobox.get_model()
-		iter = self.combobox.get_active_iter()
-
-		if iter is not None:
-			name = model[iter][0]
-			self.uistate['lang'] = LANGUAGES[name]
+		if self.combobox.get_child().get_text() in LANGUAGES:
+			self.uistate['lang'] = LANGUAGES[self.combobox.get_child().get_text()]
+			self.uistate['id'] = self.entry.get_text()
 			self.uistate['line_numbers'] = self.checkbox.get_active()
-			self.result = (self.uistate['lang'], self.uistate['line_numbers'])
+			self.result = (self.uistate['id'], self.uistate['lang'], self.uistate['line_numbers'])
 			return True
 		else:
 			return False # no syntax selected

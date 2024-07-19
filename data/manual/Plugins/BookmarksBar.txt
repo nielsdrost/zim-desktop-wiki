@@ -3,8 +3,7 @@ Wiki-Format: zim 0.4
 
 ====== BookmarksBar Plugin ======
 
-This plugin adds the ability to bookmark pages.
-All bookmarks are placed below the toolbar.
+This plugin adds the ability to bookmark pages and show them in a separate bar.
 
 **Dependencies:** This plugin has no additional dependencies.
 

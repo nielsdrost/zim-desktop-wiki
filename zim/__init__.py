@@ -93,10 +93,10 @@ Some generic base classes and functions can be found in L{zim.utils}
 
 
 # Bunch of meta data, used at least in the about dialog
-__version__ = '0.73.5'
+__version__ = '0.75.2'
 __url__ = 'https://www.zim-wiki.org'
 __author__ = 'Jaap Karssenberg <jaap.karssenberg@gmail.com>'
-__copyright__ = 'Copyright 2008 - 2019 Jaap Karssenberg <jaap.karssenberg@gmail.com>'
+__copyright__ = 'Copyright 2008 - 2023 Jaap Karssenberg <jaap.karssenberg@gmail.com>'
 __license__ = '''\
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -141,7 +141,7 @@ except locale.Error:
 
 _pref_enc = locale.getpreferredencoding()
 if _pref_enc in ('ascii', 'us-ascii', 'ANSI_X3.4-1968'):
-	logger.warn(
+	logger.warning(
 		'Your system encoding is set to %s, if you want support for special characters\n'
 		'or see errors due to encoding, please ensure to configure your system to use "UTF-8"' % _pref_enc
 	)
@@ -160,7 +160,10 @@ if os.name == "nt" and not os.environ.get('LANG') and _lang not in (None, 'C'):
 	os.environ['LANG'] = _lang + '.' + _enc if _enc else _lang
 
 
-_localedir = os.path.join(os.path.dirname(ZIM_EXECUTABLE), 'locale')
+if os.path.isfile('/.flatpak-info'):
+	_localedir = os.path.join('/app/share/locale/')
+else:
+	_localedir = os.path.join(os.path.dirname(ZIM_EXECUTABLE), 'locale')
 
 try:
 	if os.path.isdir(_localedir):
@@ -188,7 +191,7 @@ if os.name == 'nt':
 	# Windows specific environment variables
 	# os.environ does not support setdefault() ...
 	if not 'USER' in os.environ or not os.environ['USER']:
-		os.environ['USER'] = os.environ['USERNAME']
+		os.environ['USER'] = os.environ.get('USERNAME')
 
 	if not 'HOME' in os.environ or not os.environ['HOME']:
 		if 'USERPROFILE' in os.environ:
@@ -206,3 +209,4 @@ if not os.path.isdir(os.environ['HOME']):
 if not 'USER' in os.environ or not os.environ['USER']:
 	os.environ['USER'] = os.path.basename(os.environ['HOME'])
 	logger.info('Environment variable $USER was not set, set to "%s"', os.environ['USER'])
+

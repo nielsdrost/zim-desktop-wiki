@@ -13,8 +13,7 @@ import threading
 
 from functools import partial
 
-from zim.fs import TmpFile
-from zim.newfs import LocalFolder
+from zim.newfs import LocalFolder, TmpFile
 from zim.plugins import PluginClass, find_extension
 from zim.actions import action
 from zim.signals import ConnectorMixin
@@ -24,7 +23,7 @@ from zim.gui.applications import DesktopEntryFile
 from zim.config import value_is_coord, data_dirs
 from zim.notebook import NotebookExtension
 from zim.notebook.operations import NotebookState, SimpleAsyncOperation
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 
 from zim.gui.mainwindow import MainWindowExtension
 from zim.gui.widgets import ErrorDialog, QuestionDialog, Dialog, \
@@ -148,9 +147,6 @@ class VersionControlMainWindowExtension(MainWindowExtension):
 
 		if self.plugin.preferences['autosave_at_interval']:
 			self._start_timer()
-
-	def destroy(self):
-		self._stop_timer()
 
 	def _start_timer(self):
 		timeout = 60000 * self.plugin.preferences['autosave_interval']
@@ -311,9 +307,10 @@ class VCS(object):
 			# return 'cvs', path
 		##
 		else:
-			try:
-				return klass._detect_in_folder(folder.parent()) # recurs
-			except ValueError:
+			parent = folder.parent()
+			if parent:
+				return klass._detect_in_folder(parent) # recurs
+			else:
 				return None, None
 
 	@classmethod
@@ -708,9 +705,8 @@ class VCSApplicationBase(ConnectorMixin):
 
 def get_side_by_side_app():
 	for dir in data_dirs('helpers/compare_files/'):
-		for name in dir.list(): # XXX need object list
-			file = dir.file(name)
-			if name.endswith('.desktop') and file.exists():
+		for file in dir.list_files():
+			if file.basename.endswith('.desktop'):
 				app = DesktopEntryFile(file)
 				if app.tryexec():
 					return app
@@ -973,7 +969,7 @@ state. Or select multiple versions to see changes between those versions.
 			if page \
 			and page.source_file is not None \
 			and page.source_file.ischild(self.vcs.root):
-				return page.source
+				return page.source_file
 			else:
 				return None # TODO error message ?
 
@@ -981,7 +977,7 @@ state. Or select multiple versions to see changes between those versions.
 		# TODO check for gannotated
 		file = self._get_file()
 		assert not file is None
-		annotated = self.vcs.annotated(file)
+		annotated = self.vcs.annotate(file)
 		TextDialog(self, _('Annotated Page Source'), annotated).run()
 			# T: dialog title
 

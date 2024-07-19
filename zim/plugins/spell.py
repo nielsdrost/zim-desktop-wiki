@@ -1,7 +1,6 @@
 
-# Copyright 2008,2015 Jaap Karssenberg <jaap.karssenberg@gmail.com>
+# Copyright 2008,2015,2023 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
-'''Spell check plugin based on gtkspell'''
 
 import re
 import locale
@@ -11,33 +10,61 @@ logger = logging.getLogger('zim.plugins.spell')
 
 
 from zim.plugins import PluginClass
-from zim.signals import SIGNAL_AFTER
+from zim.signals import SIGNAL_AFTER, ConnectorMixin
 from zim.actions import toggle_action
 
 from zim.gui.pageview import PageViewExtension
 from zim.gui.widgets import ErrorDialog
 
+import gi
 
-# Try which of the two bindings is available
+# Try which of the bindings is available
+
+gtkspellcheck = None
+gtkspell = None
+Gspell = None
+
+
 try:
+	gi.require_version('Gtk','3.0') # see issue #2301
 	import gtkspellcheck
-except ImportError:
+except:
 	gtkspellcheck = None
 
+if not gtkspellcheck:
 	try:
-		import gi
+		gi.require_version('Gspell', '1')
+		from gi.repository import Gspell
+		
+		langs = Gspell.language_get_available()
+		#for lang in langs:
+		#	logger.debug('%s (%s) dict available', lang.get_name(), lang.get_code())
+		if not langs:
+			Gspell = None
+	except:
+		Gspell = None
+
+if not Gspell:
+	try:
 		gi.require_version('GtkSpell', '3.0')
 		from gi.repository import GtkSpell as gtkspell
 	except:
 		gtkspell = None
-else:
-	gtkspell = None
+
 
 
 # Hotfix for robustness of loading languages in gtkspellcheck
 # try to be robust for future versions breaking this or not needing it
 # See https://github.com/koehlma/pygtkspellcheck/issues/22
-if gtkspellcheck \
+#
+# gtkspellchecker 5 has removed "pylocales", so if not present the fix is no
+# longer working. Not sure if it is still needed with this release.
+try:
+	import pylocales
+except ImportError:
+	pylocales = None
+
+if gtkspellcheck and pylocales \
 and hasattr(gtkspellcheck.SpellChecker, '_LanguageList') \
 and hasattr(gtkspellcheck.SpellChecker._LanguageList, 'from_broker'):
 	from pylocales import code_to_name
@@ -68,7 +95,8 @@ class SpellPlugin(PluginClass):
 	plugin_info = {
 		'name': _('Spell Checker'), # T: plugin name
 		'description': _('''\
-Adds spell checking support using gtkspell.
+Adds spell checking support using 
+gtkspellchecker, Gspell, or gtkspell libraries.
 
 This is a core plugin shipping with zim.
 '''), # T: plugin description
@@ -82,8 +110,9 @@ This is a core plugin shipping with zim.
 
 	@classmethod
 	def check_dependencies(klass):
-		return bool(gtkspellcheck or gtkspell), [
+		return any((gtkspellcheck, Gspell, gtkspell)), [
 			('gtkspellcheck', not gtkspellcheck is None, True),
+			('Gspell', not Gspell is None, True),
 			('gtkspell', not gtkspell is None, True)
 		]
 
@@ -112,7 +141,7 @@ class SpellPageViewExtension(PageViewExtension):
 	def _choose_adapter_cls(self):
 		if gtkspellcheck:
 			version = tuple(
-				map(int, re.findall('\d+', gtkspellcheck.__version__))
+				map(int, re.findall(r'\d+', gtkspellcheck.__version__))
 			)
 			if version >= (4, 0, 3):
 				return GtkspellcheckAdapter
@@ -122,6 +151,8 @@ class SpellPageViewExtension(PageViewExtension):
 					gtkspellcheck.__version__
 				)
 				return OldGtkspellcheckAdapter
+		elif Gspell:
+			return GspellAdapter
 		else:
 			return GtkspellAdapter
 
@@ -146,7 +177,8 @@ class SpellPageViewExtension(PageViewExtension):
 		textview = pageview.textview
 		checker = getattr(textview, '_gtkspell', None)
 		if checker:
-			checker.on_new_buffer()
+			# A new buffer may be initialized, but it could also be an existing buffer linked to page
+			checker.check_buffer_initialized()
 
 	def setup(self):
 		textview = self.pageview.textview
@@ -172,18 +204,28 @@ class SpellPageViewExtension(PageViewExtension):
 			textview._gtkspell = None
 
 
-class GtkspellcheckAdapter(object):
+class AdapterBase(ConnectorMixin, object):
+
+	def on_begin_insert_tree(self, o, *a):
+		self._checker.disable()
+
+	def on_end_insert_tree(self, o, *a):
+		self._checker.enable()
+
+
+class GtkspellcheckAdapter(AdapterBase):
 
 	def __init__(self, textview, lang):
 		self._lang = lang
 		self._textview = textview
+		self._textbuffer = None
 		self._checker = None
 		self._active = False
 
 		self.enable()
 
-	def on_new_buffer(self):
-		if self._checker:
+	def check_buffer_initialized(self):
+		if self._checker and not self._check_tag_table():
 			self._checker.buffer_initialize()
 
 	def enable(self):
@@ -192,36 +234,48 @@ class GtkspellcheckAdapter(object):
 		else:
 			self._clean_tag_table()
 			self._checker = gtkspellcheck.SpellChecker(self._textview, self._lang)
+
+		self._textbuffer = self._textview.get_buffer()
+		self.connectto_all(self._textbuffer, ('begin-insert-tree', 'end-insert-tree'))
 		self._active = True
 
 	def disable(self):
 		if self._checker:
 			self._checker.disable()
+			self.disconnect_from(self._textbuffer)
+			self._textbuffer = None
+
 		self._active = False
 
 	def detach(self):
 		if self._checker:
-			self._checker.disable()
+			self.disable()
 			self._clean_tag_table()
 			self._checker = None
-		self._active = False
+
+	def _check_tag_table(self):
+		tags = []
+
+		def filter_spell_tags(t):
+			name = t.get_property('name')
+			if name and name.startswith('gtkspellchecker'):
+				tags.append(t)
+
+		table = self._textview.get_buffer().get_tag_table()
+		table.foreach(filter_spell_tags)
+		return tags
 
 	def _clean_tag_table(self):
 		## cleanup tag table - else next loading will fail
-		prefix = 'gtkspellchecker'
 		table = self._textview.get_buffer().get_tag_table()
-		tags = []
-		table.foreach(lambda tag: tags.append(tag))
-		for tag in tags:
-			name = tag.get_property('name')
-			if name and name.startswith(prefix):
-				table.remove(tag)
+		for tag in self._check_tag_table():
+			table.remove(tag)
 
 
 class OldGtkspellcheckAdapter(GtkspellcheckAdapter):
 
-	def on_new_buffer(self):
-		if self._checker:
+	def check_buffer_initialized(self):
+		if self._checker and not self._check_tag_table():
 			# wanted to use checker.buffer_initialize() here,
 			# but gives issue, see https://github.com/koehlma/pygtkspellcheck/issues/24
 			if self._active:
@@ -231,15 +285,16 @@ class OldGtkspellcheckAdapter(GtkspellcheckAdapter):
 				self.detach()
 
 
-class GtkspellAdapter(object):
+class GtkspellAdapter(AdapterBase):
 
 	def __init__(self, textview, lang):
 		self._lang = lang
 		self._textview = textview
+		self._textbuffer = None
 		self._checker = None
 		self.enable()
 
-	def on_new_buffer(self):
+	def check_buffer_initialized(self):
 		pass
 
 	def enable(self):
@@ -247,11 +302,41 @@ class GtkspellAdapter(object):
 			self._checker = gtkspell.Checker()
 			self._checker.set_language(self._lang)
 			self._checker.attach(self._textview)
+			self._textbuffer = self._textview.get_buffer()
+			self.connectto_all(self._textbuffer, ('begin-insert-tree', 'end-insert-tree'))
 
 	def disable(self):
 		self.detach()
 
 	def detach(self):
 		if self._checker:
+			self.disconnect_from(self._textbuffer)
+			self._textbuffer = None
 			self._checker.detach()
 			self._checker = None
+
+
+class GspellAdapter(AdapterBase):
+
+	def __init__(self, textview, lang):
+		gspell_language = Gspell.language_lookup(lang)
+		checker = Gspell.Checker.new(gspell_language)
+		buffer = Gspell.TextBuffer.get_from_gtk_text_buffer(textview.get_buffer())
+		buffer.set_spell_checker(checker)
+		self._gspell_view = Gspell.TextView.get_from_gtk_text_view(textview)
+		self.enable()
+
+	def check_buffer_initialized(self):
+		pass
+
+	def enable(self):
+		self._gspell_view.set_inline_spell_checking(True)
+		self._gspell_view.set_enable_language_menu(True)
+		
+	def disable(self):
+		self.detach()
+
+	def detach(self):
+		self._gspell_view.set_inline_spell_checking(False)
+		self._gspell_view.set_enable_language_menu(False)
+

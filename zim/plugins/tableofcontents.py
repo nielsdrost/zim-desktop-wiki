@@ -5,9 +5,8 @@ from gi.repository import Gtk
 from gi.repository import Gdk
 from gi.repository import GObject
 from gi.repository import Pango
+from typing import List, Optional, Tuple
 
-import re
-import datetime
 import logging
 
 logger = logging.getLogger('zim.plugins.tableofcontents')
@@ -15,30 +14,16 @@ logger = logging.getLogger('zim.plugins.tableofcontents')
 
 from zim.plugins import PluginClass
 from zim.signals import ConnectorMixin, DelayedCallback
-from zim.notebook import Path
-from zim.tokenparser import collect_untill_end_token, tokens_to_text
+from zim.parse.tokenlist import tokens_to_text, collect_until_end_token
 from zim.formats import HEADING, LINE
 
+from zim.gui.clipboard import Clipboard, SelectionClipboard
 from zim.gui.pageview import PageViewExtension
 from zim.gui.widgets import LEFT_PANE, PANE_POSITIONS, BrowserTreeView, populate_popup_add_separator, \
 	WindowSidePaneWidget, widget_set_css
-from zim.gui.pageview import FIND_REGEX, SCROLL_TO_MARK_MARGIN, _is_heading_tag, LineSeparatorAnchor
+from zim.gui.pageview import SCROLL_TO_MARK_MARGIN, LineSeparatorAnchor
 
 LINE_LEVEL = 2  # assume level 1 is page heading, level 2 is topic break within page
-
-# FIXME, these methods should be supported by pageview - need anchors - now it is a HACK
-
-def _is_heading_or_line(iter, include_hr):
-	if list(filter(_is_heading_tag, iter.get_tags())):
-		return True
-	elif not include_hr:
-		return False
-	else:
-		anchor = iter.get_child_anchor()
-		if anchor and  isinstance(anchor, LineSeparatorAnchor):
-			return True
-		else:
-			return False
 
 
 def find_heading(buffer, n, include_hr):
@@ -47,11 +32,16 @@ def find_heading(buffer, n, include_hr):
 	@param n: an integer
 	@returns: a C{Gtk.TextIter} for the line start of the heading or C{None}
 	'''
+	if include_hr:
+		check = lambda i: buffer.get_line_is_heading(i.get_line()) or buffer.get_anchor_object_at_iter(i, LineSeparatorAnchor)
+	else:
+		check = lambda i: buffer.get_line_is_heading(i.get_line())
+
 	iter = buffer.get_start_iter()
-	i = 1 if _is_heading_or_line(iter, include_hr) else 0
+	i = 1 if check(iter) else 0
 	while i < n:
 		iter.forward_line()
-		while not _is_heading_or_line(iter, include_hr):
+		while not check(iter):
 			if not iter.forward_line():
 				return None
 		i += 1
@@ -76,7 +66,7 @@ def get_headings(parsetree, include_hr):
 		if t[0] == HEADING:
 			level = int(t[1]['level'])
 			text = tokens_to_text(
-						collect_untill_end_token(tokens, HEADING) )
+						collect_until_end_token(tokens, HEADING) ).strip()
 			assert level > 0 # just to be sure
 			while stack[-1][0] >= level:
 				stack.pop()
@@ -299,7 +289,7 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 
 		self.pageview = pageview
 		if self.pageview.page:
-			self.load_page(self.pageview.page)
+			self.on_page_changed(self.pageview, self.pageview.page)
 
 	def set_preferences(self, show_h1, include_hr, fontsize):
 		changed = (show_h1, include_hr, fontsize) != (self.show_h1, self.include_hr, self.fontsize)
@@ -324,7 +314,8 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 		if tree is None:
 			model.clear()
 		else:
-			model.update(get_headings(tree, self.include_hr), self.show_h1)
+			if model is not None:
+				model.update(get_headings(tree, self.include_hr), self.show_h1)
 		self.emit('changed')
 
 	def on_heading_activated(self, treeview, path, column):
@@ -372,6 +363,29 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 
 		buffer.select_range(start, end)
 
+	def on_copy_link_to_anchor(self, obj, anchor: str, heading_text: str):
+		Clipboard.set_pagelink(self.pageview.notebook, self.pageview.page, anchor, heading_text)
+		SelectionClipboard.set_pagelink(self.pageview.notebook, self.pageview.page, anchor, heading_text)
+		return True
+
+	def can_copy_link_to_anchor(self, paths: List[str]) -> Optional[Tuple[str,str]]:
+		if not paths or len(paths) != 1:
+			return None
+		model = self.treeview.get_model()
+		n = model.get_nth_heading(paths[0])
+		textview = self.pageview.textview
+		buffer = textview.get_buffer()
+		hd_iter = find_heading(buffer, n, self.include_hr)
+		if not hd_iter:
+			return None
+		anchor = buffer.get_anchor_for_location(hd_iter)
+		if not anchor:
+			return None
+		heading_text = buffer.get_heading_text(hd_iter)
+		if not heading_text:
+			return None
+		return anchor, heading_text
+
 	def on_populate_popup(self, treeview, menu):
 		model, paths = treeview.get_selection().get_selected_rows()
 		if not paths:
@@ -380,6 +394,8 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 		else:
 			can_promote = self.can_promote(paths)
 			can_demote = self.can_demote(paths)
+
+		link_details = self.can_copy_link_to_anchor(paths)
 
 		populate_popup_add_separator(menu, prepend=True)
 		for text, sensitive, handler in (
@@ -390,12 +406,32 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 		):
 			item = Gtk.MenuItem.new_with_mnemonic(text)
 			menu.prepend(item)
-			if sensitive:
+			if sensitive and link_details:  # exclude horizontal bars
 				item.connect('activate', handler)
 			else:
 				item.set_sensitive(False)
 
+		menu.append(Gtk.SeparatorMenuItem())
+
+		item = Gtk.MenuItem.new_with_mnemonic(_('Copy _link to this location'))  # T: menu item
+		menu.append(item)
+		if link_details:
+			item.connect('activate', self.on_copy_link_to_anchor, *link_details)
+		else:
+			item.set_sensitive(False)
+
+		# open item in new window
+		item = Gtk.MenuItem.new_with_mnemonic(_('Open in New _Window'))  # T: menu item
+		menu.append(item)
+		if link_details:
+			item.connect('activate', self.on_open_in_new_window, *link_details)
+		else:
+			item.set_sensitive(False)
+
 		menu.show_all()
+
+	def on_open_in_new_window(self, obj, anchor: str, heading_text: str):
+		self.pageview.navigation.open_page(self.pageview.page, anchor, new_window=True)
 
 	def can_promote(self, paths):
 		# All headings have level larger than 1
@@ -413,7 +449,7 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 			for i in model.walk(iter):
 				p = model.get_path(i)
 				key = tuple(p)
-				if not key in seen:
+				if key not in seen:
 					if self.show_h1:
 						newlevel = len(p) - 1
 					else:
@@ -474,12 +510,12 @@ class ToCWidget(ConnectorMixin, Gtk.ScrolledWindow):
 		if self.select_heading(path):
 			self.pageview.toggle_format('h' + str(level))
 		else:
-			logger.warn('Failed to select heading for path: %', path)
+			logger.warning('Failed to select heading for path: %', path)
 
 
 class SidePaneToC(ToCWidget, WindowSidePaneWidget):
 
-	title = _('ToC') # T: widget label
+	title = _('T_oC') # T: widget label
 
 	def __init__(self, pageview):
 		ToCWidget.__init__(self, pageview, ellipsis=True)
@@ -499,17 +535,17 @@ class MyEventBox(Gtk.EventBox):
 
 class FloatingToC(Gtk.VBox, ConnectorMixin):
 
-	# This class does all the work to keep the floating window in
-	# the right place, and with the right size
+	# This class puts the floating window in the pageview overlay layer
+	# and adjusts it's size on the fly
 
-	X_OFFSET = 10 # offset right side textview
-	Y_OFFSET = 5 # offset top textview
-	S_MARGIN = 5 # margin inside the toc for scrollbars
+	MARGIN_END = 12 # offset right side textview
+	MARGIN_TOP = 12 # offset top textview
+	SCROLL_MARGIN = 10 # margin inside the toc for scrollbars
 
 	def __init__(self, pageview):
 		GObject.GObject.__init__(self)
 
-		self.head = Gtk.Label(label=_('ToC'))
+		self.head = Gtk.Label(label=_('ToC')) # T: small label above Table Of Contents
 		self.head.set_padding(5, 1)
 
 		self.tocwidget = ToCWidget(pageview, ellipsis=False)
@@ -526,23 +562,21 @@ class FloatingToC(Gtk.VBox, ConnectorMixin):
 		widget_set_css(self, 'zim-toc-widget', 'border: 1px solid @fg_color')
 		widget_set_css(self.head, 'zim-toc-head', 'border-bottom: 1px solid @fg_color')
 
-		## Add self to textview
-		# Need to wrap in event box to make widget visible
-		# probably because Containers normally don't have their own
-		# gdk window. So would paint directly on background window.
-		self.textview = pageview.textview
-		self._event_box = MyEventBox()
-		self._event_box.add(self)
+		self.set_halign(Gtk.Align.END)
+		self.set_margin_end(self.MARGIN_END)
+		self.set_valign(Gtk.Align.START)
+		self.set_margin_top(self.MARGIN_TOP)
+		pageview.overlay.add_overlay(self)
 
-		self.textview.add_child_in_window(self._event_box, Gtk.TextWindowType.WIDGET, 0, 0)
-		self.connectto(self.textview,
+		self._textview = pageview.textview
+		self.connectto(self._textview,
 			'size-allocate',
 			handler=DelayedCallback(10, self.update_size_and_position),
 				# Callback wrapper to prevent glitches for fast resizing of the window
 		)
-		self.connectto(self.tocwidget, 'changed', handler=self.update_size_and_position)
+		self.connectto(self.tocwidget, 'changed', handler=self.update_size_and_position_after_change)
 
-		self._event_box.show_all()
+		self.show_all()
 
 	def set_preferences(self, show_h1, include_hr, fontsize):
 		self.tocwidget.set_preferences(show_h1, include_hr, fontsize)
@@ -551,14 +585,14 @@ class FloatingToC(Gtk.VBox, ConnectorMixin):
 		self.tocwidget.disconnect_all()
 		ConnectorMixin.disconnect_all(self)
 
-	def destroy(self):
-		self._event_box.destroy()
-		Gtk.VBox.destroy(self)
-
 	def on_toggle(self, *a):
 		self.tocwidget.set_visible(
 			not self.tocwidget.get_visible()
 		)
+		self.update_size_and_position()
+
+	def update_size_and_position_after_change(self, *a):
+		self.tocwidget.treeview.expand_all()
 		self.update_size_and_position()
 
 	def update_size_and_position(self, *a):
@@ -569,18 +603,18 @@ class FloatingToC(Gtk.VBox, ConnectorMixin):
 		else:
 			self.show()
 
-		text_window = self.textview.get_window(Gtk.TextWindowType.WIDGET)
+		text_window = self._textview.get_window(Gtk.TextWindowType.WIDGET)
 		if text_window is None:
 			return
 
 		text_x, text_y, text_w, text_h = text_window.get_geometry()
-		max_w = 0.5 * text_w - self.X_OFFSET
-		max_h = 0.7 * text_h - self.Y_OFFSET
+		max_w = 0.5 * text_w - self.MARGIN_END
+		max_h = 0.7 * text_h - self.MARGIN_TOP
 
 		head_minimum, head_natural = self.head.get_preferred_width()
 		view_minimum, view_natural = self.tocwidget.treeview.get_preferred_width()
 		if self.tocwidget.get_visible():
-			my_width = max(head_natural, view_natural + self.S_MARGIN)
+			my_width = max(head_natural, view_natural + self.SCROLL_MARGIN)
 			width = min(my_width, max_w)
 		else:
 			width = head_natural
@@ -588,13 +622,9 @@ class FloatingToC(Gtk.VBox, ConnectorMixin):
 		head_minimum, head_natural = self.head.get_preferred_height()
 		view_minimum, view_natural = self.tocwidget.treeview.get_preferred_height()
 		if self.tocwidget.get_visible():
-			my_height = head_natural + view_natural + self.S_MARGIN
+			my_height = head_natural + view_natural + self.SCROLL_MARGIN
 			height = min(my_height, max_h)
 		else:
 			height = head_natural
 
 		self.set_size_request(width, height)
-
-		x = text_w - width - self.X_OFFSET
-		y = self.Y_OFFSET
-		self.textview.move_child(self._event_box, x, y)

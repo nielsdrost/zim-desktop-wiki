@@ -83,9 +83,11 @@ External links like `http://nongnu.org <http://nongnu.org>`_ and `foo@bar.org <m
 
 Tags: @foo @bar
 
+Anchors: [id: foo]  `#foo <#foo>`_  `page#foo <page#foo>`_
 
-head 4
-""""""
+
+head 4 [id: head-4-anchor]
+""""""""""""""""""""""""""
 
 - item 1
 - item 2
@@ -113,6 +115,7 @@ TODO list:
 - ☒ baz
 
 - ▷ Migrated checkbox
+- ◁ Transmigrated checkbox
 
 A numbered list:
 1. foo
@@ -175,6 +178,13 @@ A line in English, should be left aligned.
 aaa
 
 
+A horizontal line
+
+*****
+
+And more text
+
+
 Some Objects
 ------------
 
@@ -211,7 +221,7 @@ Multiformatting **bold**
 normal **bold** normal2
 normal strike **nested bold** strike2 normal2
 normal strike **nested bold** strike2 *italic `link <https://example.org>`_* normal2
-normal strike  **nested bold** middle of the text *italic `link <https://example.org>`_* yet another text **another bold *yet another italic***  normal2
+normal strike  **nested bold** middle of the text *italic `link <https://example.org>`_* yet another text **another bold *yet another italic*** normal2
 
 This is a `link **with** formatting <https://example.org>`_
 

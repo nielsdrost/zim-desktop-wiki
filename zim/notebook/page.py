@@ -6,13 +6,15 @@ import re
 import logging
 import itertools
 
+from typing import Generator, Generic, List, Optional, Union
+
 logger = logging.getLogger('zim.notebook')
 
 
-from zim.parsing import link_type
+from zim.parse.links import link_type
+from zim.errors import Error
 
 import zim.formats
-import zim.fs
 import zim.newfs
 
 from zim.signals import SignalEmitter, SIGNAL_NORMAL
@@ -23,7 +25,7 @@ import zim.datetimetz as datetime
 _pagename_reduce_colon_re = re.compile('::+')
 _pagename_invalid_char_re = re.compile(
 	'(' +
-		'^[_\W]+|(?<=:)[_\W]+' +
+		r'^[_\W]+|(?<=:)[_\W]+' +
 	'|' +
 		'[' + re.escape(''.join(
 			("?", "#", "/", "\\", "*", '"', "<", ">", "|", "%", "\t", "\n", "\r")
@@ -35,7 +37,7 @@ re.UNICODE)
 	# The UNICODE flag is used to make the alphanumber check international.
 
 
-def shortest_unique_names(paths):
+def shortest_unique_names(paths: List['Path']) -> List[str]:
 	'''Returns the shortest unique name for each path in paths
 	@param paths: list of L{Path} objects
 	@returns: list of strings
@@ -71,7 +73,7 @@ def shortest_unique_names(paths):
 	return result
 
 
-class Path(object):
+class Path():
 	'''Class representing a page name in the notebook
 
 	This is the parent class for the Page class. It contains the name
@@ -123,12 +125,11 @@ class Path(object):
 	__slots__ = ('name',)
 
 	@staticmethod
-	def assertValidPageName(name):
+	def assertValidPageName(name: str) -> None:
 		'''Raises an C{AssertionError} if C{name} does not represent
 		a valid page name.
 		This is a strict check, most names that fail this test can still
 		be cleaned up by the L{makeValidPageName()}.
-		@param name: a string
 		@raises AssertionError: if the name is not valid
 		'''
 		assert isinstance(name, str)
@@ -138,13 +139,11 @@ class Path(object):
 			raise AssertionError('Not a valid page name: %s' % name)
 
 	@staticmethod
-	def makeValidPageName(name):
+	def makeValidPageName(name: str) -> str:
 		'''Remove any invalid characters from the string and return
 		a valid page name. Only string that can not be turned in
 		somthing valid is a string that reduces to an empty string
 		after removing all invalid characters.
-		@param name: a string
-		@returns: a string
 		@raises ValueError: when the result would be an empty string
 		'''
 		newname = _pagename_reduce_colon_re.sub(':', name.strip(':'))
@@ -156,7 +155,7 @@ class Path(object):
 			raise ValueError('Not a valid page name: %s (was: %s)' % (newname, name))
 		return newname
 
-	def __init__(self, name):
+	def __init__(self, name: Union[str, tuple]):
 		'''Constructor.
 
 		@param name: the absolute page name in the right case as a
@@ -181,13 +180,13 @@ class Path(object):
 			raise ValueError('BUG: invalid input, page names should be in ascii, or given as unicode')
 
 	@classmethod
-	def new_from_zim_config(klass, string):
+	def new_from_zim_config(klass, string: str) -> 'Path':
 		'''Returns a new object based on the string representation for
 		that path.
 		'''
 		return klass(klass.makeValidPageName(string))
 
-	def serialize_zim_config(self):
+	def serialize_zim_config(self) -> str:
 		'''Returns the name for serializing this path'''
 		return self.name
 
@@ -216,18 +215,18 @@ class Path(object):
 		return self.child(name)
 
 	@property
-	def parts(self):
+	def parts(self) -> List[str]:
 		'''Get all the parts of the name (split on ":")'''
 		return self.name.split(':')
 
 	@property
-	def basename(self):
+	def basename(self) -> str:
 		'''Get the basename of the path (last part of the name)'''
 		i = self.name.rfind(':') + 1
 		return self.name[i:]
 
 	@property
-	def namespace(self):
+	def namespace(self) -> str:
 		'''Gives the name for the parent page.
 		Returns an empty string for the top level namespace.
 		'''
@@ -238,16 +237,16 @@ class Path(object):
 			return ''
 
 	@property
-	def isroot(self):
+	def isroot(self) -> bool:
 		'''C{True} when this Path represents the top level namespace'''
 		return self.name == ''
 
-	def relname(self, path): # TODO make this use HRef !
+	def relname(self, path: 'Path') -> str: # TODO make this use HRef !
 		'''Get a part of this path relative to a parent path
 
 		@param path: a parent L{Path}
 
-		Raises an error if C{path} is not a parent
+		@raises ValueError: if C{path} is not a parent
 
 		@returns: the part of the path that is relative to C{path}
 		'''
@@ -260,7 +259,7 @@ class Path(object):
 			raise ValueError('"%s" is not below "%s"' % (self, path))
 
 	@property
-	def parent(self):
+	def parent(self) -> 'Path':
 		'''Get the path for the parent page'''
 		namespace = self.namespace
 		if namespace:
@@ -270,7 +269,7 @@ class Path(object):
 		else:
 			return Path(':')
 
-	def parents(self):
+	def parents(self) -> Generator['Path', None, None]:
 		'''Generator function for parent Paths including root'''
 		if ':' in self.name:
 			path = self.name.split(':')
@@ -281,7 +280,7 @@ class Path(object):
 				path.pop()
 		yield Path(':')
 
-	def child(self, basename):
+	def child(self, basename: str) -> 'Path':
 		'''Get a child Path
 
 		@param basename: the relative name for the child
@@ -289,21 +288,21 @@ class Path(object):
 		'''
 		return Path(self.name + ':' + basename)
 
-	def ischild(self, parent):
+	def ischild(self, parent: 'Path') -> bool:
 		'''Check whether this path is a child of a given path
 		@param parent: a L{Path} object
 		@returns: True when this path is a (grand-)child of C{parent}
 		'''
 		return parent.isroot or self.name.startswith(parent.name + ':')
 
-	def match_namespace(self, namespace):
+	def match_namespace(self, namespace: 'Path') -> bool:
 		'''Check whether this path is in a specific section of the notebook
 		@param namespace: a L{Path} object
 		@returns: True when this path is equal to C{namespace} or is a (grand-)child of C{namespace}
 		'''
 		return namespace.isroot or self.name == namespace.name or self.name.startswith(namespace.name + ':')
 
-	def commonparent(self, other):
+	def commonparent(self, other: 'Path') -> 'Path':
 		'''Find a common parent for two Paths
 
 		@param other: another L{Path} object
@@ -325,26 +324,44 @@ class Path(object):
 				return Path(':'.join(parent))
 
 
+HRef_rel_flavor = int
 HREF_REL_ABSOLUTE = 0
 HREF_REL_FLOATING = 1
 HREF_REL_RELATIVE = 2
 
-class HRef(object):
+class HRef():
+	'''Represents a link as it appears in the wiki source.
+	Contains semantic information about the link type, but
+	does not contain an end point.
 
-	__slots__ = ('rel', 'names')
+	Introduced to help preserve link type when moving content.
+
+	@note: To create the shortest link between two pages,
+	use L{Notebook.pages.create_link}
+
+	@note: To resolve a link into a L{Path}, create a L{HRef}
+	and pass it to L{Notebook.pages.resolve_link}.
+	'''
+
+	__slots__ = ('rel', 'names', 'anchor')
 
 	@classmethod
-	def new_from_wiki_link(klass, href):
+	def makeValidHRefString(klass, href: str) -> str:
+		return klass.new_from_wiki_link(href).to_wiki_link()
+
+	@classmethod
+	def new_from_wiki_link(klass, href: str) -> 'Href':
 		'''Constructor that constructs a L{HRef} object for a link as
-		writen in zim's wiki syntax.
+		written in zim's wiki syntax.
 		@param href: a string for the link
-		@returns: a L{HRef} object
 		@raises ValueError: when the string could not be parsed
 		(see L{Path.makeValidPageName()})
 
-		@note: This mehtod HRef class assumes the logic of our wiki links
-		for other formats, a separate constructor may be needed
+		@note: This method HRef class assumes the logic of our wiki links.
+		For other formats, a separate constructor may be needed.
 		'''
+		href = href.strip()
+
 		if href.startswith(':'):
 			rel = HREF_REL_ABSOLUTE
 		elif href.startswith('+'):
@@ -352,42 +369,59 @@ class HRef(object):
 		else:
 			rel = HREF_REL_FLOATING
 
-		names = Path.makeValidPageName(href.lstrip('+'))
-			# Can raise ValueError if link would reduce to empty string
-		return klass(rel, names)
+		anchor = None
+		if '#' in href:
+			href, anchor = href.split('#', 1)
+			anchor = zim.formats.heading_to_anchor(anchor) # make valid achor string
 
-	def __init__(self, rel, names):
+		names = Path.makeValidPageName(href.lstrip('+')) if href else ""
+
+		return klass(rel, names, anchor)
+
+	def __init__(self, rel: HRef_rel_flavor, names: str, anchor: Optional[str] = None):
 		self.rel = rel
 		self.names = names
+		self.anchor = anchor
 
 	def __str__(self):
 		rel = {HREF_REL_ABSOLUTE: 'abs', HREF_REL_FLOATING: 'float', HREF_REL_RELATIVE: 'rel'}[self.rel]
-		return '<%s: %s %s>' % (self.__class__.__name__, rel, self.names)
+		return '<%s: %s %s %s>' % (self.__class__.__name__, rel, self.names, self.anchor)
 
-	def parts(self):
-		return self.names.split(':')
+	def __eq__(self, other):
+		return (self.__class__ is other.__class__) and (str(self) == str(other))
 
-	def to_wiki_link(self):
+	def parts(self) -> Union[List, List[str]]:
+		return self.names.split(':') if self.names else []
+
+	def short_name(self) -> str:
+		" Returns the last name part and/or anchor if any. "
+		name = self.parts()[-1] if self.names else ""
+		return name + "#" + self.anchor if self.anchor else name
+
+	def to_wiki_link(self) -> str:
 		'''Returns href as text for wiki link'''
 		if self.rel == HREF_REL_ABSOLUTE:
-			return ":" + self.names.strip(':')
+			link = ":" + self.names.strip(':')
 		elif self.rel == HREF_REL_RELATIVE:
-			return "+" + self.names
+			link = "+" + self.names
 		else:
-			return self.names
+			link = self.names
+
+		if self.anchor:
+			link += "#" + self.anchor
+
+		return link
 
 
+class PageError(Error):
 
-class SourceFile(zim.fs.File):
+	def __init__(self, path):
+		self.path = path
+		self.msg = self._msg % path.name
 
-	def iswritable(self):
-		return False
 
-	def write(self, *a):
-		raise AssertionError('Not writeable')
-
-	def writelines(self, *a):
-		raise AssertionError('Not writeable')
+class PageReadOnlyError(PageError):
+	_msg = _('Can not modify page: %s') # T: error message for read-only pages
 
 
 class Page(Path, SignalEmitter):
@@ -409,39 +443,37 @@ class Page(Path, SignalEmitter):
 	@ivar haschildren: C{True} if the page has sub-pages
 	@ivar modified: C{True} if the page was modified since the last
 	store. Will be reset by L{Notebook.store_page()}
-	@ivar readonly: C{True} when the page is read-only
-	@ivar valid: C{True} when this object is 'fresh' but C{False} e.g.
-	after flushing the notebook cache. Invalid Page objects can still
-	be used anywhere in the API where a L{Path} is needed, but not
-	for any function that actually requires a L{Page} object.
-	The way replace an invalid page object is by calling
-	C{notebook.get_page(invalid_page)}.
+	@ivar readonly: C{True} when the page is read-only or belongs to a readonly notebook
 
-	@signal: C{page-changed (changed-on-disk)}: signal emitted on page
+	@signal: C{storage-changed (changed-on-disk)}: signal emitted on page
 	change. The argument "changed-on-disk" is C{True} when an external
 	edit was detected. For internal edits it is C{False}.
+	@signal: C{modified-changed ()}: emitted when the page is edited
 	'''
 
 	__signals__ = {
-		'page-changed': (SIGNAL_NORMAL, None, (bool,))
+		'storage-changed': (SIGNAL_NORMAL, None, (bool,)),
+		'modified-changed': (SIGNAL_NORMAL, None, ()),
 	}
 
-	def __init__(self, path, haschildren, file, folder):
+	def __init__(self, path, haschildren, file, folder, format):
 		assert isinstance(path, Path)
 		self.name = path.name
 		self.haschildren = haschildren
 			# Note: this attribute is updated by the owning notebook
 			# when a child page is stored
-		self.valid = True
-		self.modified = False
+		self._modified = False
+		self._change_counter = 0
 		self._parsetree = None
-		self._ui_object = None
+		self._textbuffer = None
 		self._meta = None
 
 		self._readonly = None
 		self._last_etag = None
-		self.format = zim.formats.get_format('wiki') # TODO make configurable
-		self.source = SourceFile(file.path) # XXX
+		if isinstance(format, str):
+			self.format = zim.formats.get_format(format)
+		else:
+			self.format = format
 		self.source_file = file
 		self.attachments_folder = folder
 
@@ -462,17 +494,40 @@ class Page(Path, SignalEmitter):
 	@property
 	def hascontent(self):
 		'''Returns whether this page has content'''
-		if self._parsetree:
+		if self._textbuffer:
+			return self._textbuffer.hascontent
+		elif self._parsetree:
 			return self._parsetree.hascontent
-		elif self._ui_object:
-			tree = self._ui_object.get_parsetree()
-			if tree:
-				return tree.hascontent
-			else:
-				return False
 		else:
 			return self.source_file.exists()
 
+	@property
+	def modified(self):
+		return self._modified
+
+	def set_modified(self, modified):
+		if modified:
+			# HACK: by setting page.modified to a number rather than a
+			# bool we can use this number to check against race conditions
+			# in notebook.store_page_async post handler
+			self._change_counter = max(1, (self._change_counter + 1) % 1000)
+			self._modified = self._change_counter
+			assert bool(self._modified) is True, 'BUG in counter'
+		else:
+			self._modified = False
+		self.emit('modified-changed')
+
+	def on_buffer_modified_changed(self, buffer):
+		# one-way traffic, set page modified after modifying the buffer
+		# but do not set page.modified False again when buffer goes
+		# back to un-modified. Reason is that we use the buffer modified
+		# state to track if we already requested the parse tree (see
+		# get_parsetree()) while page modified is used to track need
+		# for saving and is reset after save was done
+		if buffer.get_modified():
+			if self.readonly:
+				logger.warning('Buffer edited while page read-only - potential bug')
+			self.set_modified(True)
 
 	def _store(self):
 		tree = self.get_parsetree()
@@ -504,32 +559,31 @@ class Page(Path, SignalEmitter):
 			self.source_file.remove()
 			self._last_etag = None
 			self._meta = None
+		self.emit('storage-changed', False)
 
 	def check_source_changed(self):
-		return self._check_source_etag()
+		'''Checks for changes in the source file and load it if needed
 
-	def _check_source_etag(self):
+		If the page has a C{textbuffer} and it contains unsaved changes, this
+		method will not overwrite them and you'll get an error on next attempt
+		to save. To force overwrite see L{reload_textbuffer()}
+		'''
 		if (
 			self._last_etag
-			and not self.source_file.verify_etag(self._last_etag)
+			and not (self.source_file.exists() and self.source_file.verify_etag(self._last_etag))
 		) or (
 			not self._last_etag
-			and (self._parsetree or self._ui_object)
 			and self.source_file.exists()
 		):
 			logger.info('Page changed on disk: %s', self.name)
 			self._last_etag = None
 			self._meta = None
-			self._parsetree = None
-			if self._ui_object is not None:
-				obj = self._ui_object
-				self._ui_object = None
-				parsetree = self.get_parsetree()
-				self._ui_object = obj
+			if self._textbuffer and not self._textbuffer.get_modified():
+				self.reload_textbuffer()
+			else:
 				self._parsetree = None
-				self._ui_object.set_parsetree(parsetree)
 
-			self.emit('page-changed', True)
+			self.emit('storage-changed', True)
 			return True
 		else:
 			return False
@@ -561,12 +615,14 @@ class Page(Path, SignalEmitter):
 
 		@returns: a L{zim.formats.ParseTree} object or C{None}
 		'''
-		assert self.valid, 'BUG: page object became invalid'
-
-		if self._parsetree:
+		if self._textbuffer:
+			if self._textbuffer.get_modified() or self._parsetree is None:
+				self._parsetree = self._textbuffer.get_parsetree()
+				self._textbuffer.set_modified(False)
+			#~ print self._parsetree.tostring()
 			return self._parsetree
-		elif self._ui_object:
-			return self._ui_object.get_parsetree()
+		elif self._parsetree:
+			return self._parsetree
 		else:
 			try:
 				text, self._last_etag = self.source_file.read_with_etag()
@@ -589,47 +645,87 @@ class Page(Path, SignalEmitter):
 		needs to be stored in the notebook to save this content
 		permanently. See L{Notebook.store_page()}.
 		'''
-		assert self.valid, 'BUG: page object became invalid'
-
 		if self.readonly:
 			raise PageReadOnlyError(self)
+		self._set_parsetree(tree)
 
-		if self._ui_object:
-			self._ui_object.set_parsetree(tree)
-		else:
-			self._parsetree = tree
+	def _set_parsetree(self, tree):
+		self._parsetree = tree
+		if self._textbuffer:
+			assert not self._textbuffer.get_modified(), 'BUG: changing parsetree while buffer was changed as well'
+			try:
+				if tree is None:
+					self._textbuffer.clear()
+				else:
+					self._textbuffer.set_parsetree(tree)
+			except:
+				# Prevent auto-save to kick in at any cost
+				self._textbuffer.set_modified(False)
+				raise
+			else:
+				self._textbuffer.set_modified(False)
 
-		self.modified = True
+		self.set_modified(True)
 
 	def append_parsetree(self, tree):
 		'''Append content
 
 		@param tree: a L{zim.formats.ParseTree} object with content
 		'''
-		ourtree = self.get_parsetree()
-		if ourtree:
-			self.set_parsetree(ourtree + tree)
+		if self._textbuffer:
+			self._textbuffer.append_parsetree(tree)
 		else:
-			self.set_parsetree(tree)
+			ourtree = self.get_parsetree()
+			if ourtree:
+				self.set_parsetree(ourtree + tree)
+			else:
+				self.set_parsetree(tree)
 
-	def set_ui_object(self, object):
-		'''Lock the page to an interface widget
+	def get_textbuffer(self, constructor=None):
+		'''Get a C{Gtk.TextBuffer} for the page
 
-		Setting a "ui object" locks the page and turns it into a proxy
-		for that widget - typically a L{zim.gui.pageview.PageView}.
-		The "ui object" should in turn have a C{get_parsetree()} and a
-		C{set_parsetree()} method which will be called by the page object.
+		Will either return an existing buffer or construct a new one and return
+		it. A C{Gtk.TextBuffer} can be shared between multiple C{Gtk.TextView}s.
+		The page object owns the textbuffer to allow multiple views on the same
+		page.
 
-		@param object: a widget or similar object or C{None} to unlock
+		Once a buffer is set, also methods like L{get_parsetree()} and
+		L{get_parsetree()} will interact with this buffer.
+
+		@param constructor: if not buffer was set previously, this function
+		is called to construct the buffer.
+
+		@returns: a C{TextBuffer} object or C{None} if no buffer is set and
+		no constructor is provided.
 		'''
-		if object is None:
-			if self._ui_object:
-				self._parsetree = self._ui_object.get_parsetree()
-				self._ui_object = None
-		else:
-			assert self._ui_object is None, 'BUG: page already being edited by another widget'
-			self._parsetree = None
-			self._ui_object = object
+		if self._textbuffer is None:
+			if constructor is None:
+				return None
+
+			tree = self.get_parsetree()
+			self._textbuffer = constructor(parsetree=tree)
+			self._textbuffer.connect('modified-changed', self.on_buffer_modified_changed)
+
+		return self._textbuffer
+
+	def reload_textbuffer(self):
+		'''Reload page content from source file and update the textbuffer if set
+
+			NOTE: this method overwrites any changes in the C{textbuffer} or
+			C{parsetree} that have not been saved to file !
+		'''
+		buffer = self._textbuffer
+		self._textbuffer = None
+		self._parsetree = None
+		if buffer is not None:
+			tree = self.get_parsetree()
+			self._textbuffer = buffer
+			buffer.set_modified(False)
+			self._set_parsetree(tree)
+				# load new tree in buffer, undo-able in 1 step
+				# private method circumvents readonly check !
+			self.set_modified(False)
+		# else do nothing - source will be read with next call to `get_parsetree()`
 
 	def dump(self, format, linker=None):
 		'''Get content in a specific format
@@ -675,53 +771,6 @@ class Page(Path, SignalEmitter):
 			self.append_parsetree(format.Parser().parse(text))
 		else:
 			self.set_parsetree(format.Parser().parse(text))
-
-	def get_links(self):
-		'''Generator for links in the page content
-
-		This method gives the raw links from the content, if you want
-		nice L{Link} objects use
-		L{index.list_links()<zim.index.Index.list_links()>} instead.
-
-		@returns: yields a list of 3-tuples C{(type, href, attrib)}
-		where:
-		  - C{type} is the link type (e.g. "page" or "file")
-		  - C{href} is the link itself
-		  - C{attrib} is a dict with link properties
-		'''
-		# FIXME optimize with a ParseTree.get_links that does not
-		#       use Node
-		tree = self.get_parsetree()
-		if tree:
-			for elt in tree.findall(zim.formats.LINK):
-				href = elt.attrib.pop('href')
-				type = link_type(href)
-				yield type, href, elt.attrib
-
-			for elt in tree.findall(zim.formats.IMAGE):
-				if not 'href' in elt.attrib:
-					continue
-				href = elt.attrib.pop('href')
-				type = link_type(href)
-				yield type, href, elt.attrib
-
-
-	def get_tags(self):
-		'''Generator for tags in the page content
-
-		@returns: yields an unordered list of unique 2-tuples
-		C{(name, attrib)} for tags in the parsetree.
-		'''
-		# FIXME optimize with a ParseTree.get_links that does not
-		#       use Node
-		tree = self.get_parsetree()
-		if tree:
-			seen = set()
-			for elt in tree.findall(zim.formats.TAG):
-				name = elt.gettext()
-				if not name in seen:
-					seen.add(name)
-					yield name.lstrip('@'), elt.attrib
 
 	def get_title(self):
 		tree = self.get_parsetree()

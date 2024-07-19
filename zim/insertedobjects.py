@@ -22,14 +22,12 @@ class InsertedObjectType(object):
 	for widgets can be found in L{zim.gui.insertedobjects}.
 	'''
 
-	# TODO: API to communicate whether this is an inline object or a block
-	#       level object. This could change while editing so must be a model
-	#       property somehow.
-
 	name = None
 
 	label = None
 	verb_icon = None
+
+	is_inline = False
 
 	object_attr = {}
 
@@ -39,6 +37,9 @@ class InsertedObjectType(object):
 		self.object_attr = self.object_attr.copy()
 			# Prevent referencing and modifying class attribute of parent class
 		self.object_attr['type'] = String(self.name)
+
+		# each inserted object has an id attribute usable as anchor for linking
+		self.object_attr['id'] = String(None)
 
 		for name in ('model_from_data', 'data_from_model', 'format'):
 			orig = getattr(self, name)

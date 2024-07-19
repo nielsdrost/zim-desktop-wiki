@@ -31,23 +31,18 @@ to let plugins extend specific application objects.
 
 
 from gi.repository import GObject
-import types
-import os
-import sys
 import logging
-import inspect
+import weakref
 
-try:
-	import collections.abc as abc
-except ImportError:
-	# python < version 3.3
-	import collections as abc
+import collections.abc as abc
+
+from zim.base import classproperty
+from zim.base.klasslookup import get_module, lookup_subclass, lookup_subclasses
 
 from zim.newfs import LocalFolder, LocalFile
 
-from zim.signals import SignalEmitter, ConnectorMixin, SIGNAL_AFTER, SIGNAL_RUN_LAST, SignalHandler
-from zim.utils import classproperty, get_module, lookup_subclass, lookup_subclasses, WeakSet
-from zim.actions import hasaction
+from zim.signals import SignalEmitter, ConnectorMixin, SIGNAL_RUN_LAST
+from zim.actions import hasaction, get_actions
 
 from zim.config import data_dirs, XDG_DATA_HOME, ConfigManager
 from zim.insertedobjects import InsertedObjectType
@@ -69,9 +64,9 @@ logger = logging.getLogger('zim.plugins')
 # Also this switch makes it easier to have a single instruction for
 # users where to put custom plugins.
 
-PLUGIN_FOLDER = XDG_DATA_HOME.subdir('zim/plugins')
+PLUGIN_FOLDER = XDG_DATA_HOME.folder('zim/plugins')
 
-for dir in data_dirs('plugins'):
+for dir in data_dirs('plugins', include_non_existing=True):
 	__path__.append(dir.path)
 
 __path__.append(__path__.pop(0)) # reshuffle real module path to the end
@@ -79,12 +74,13 @@ __path__.insert(0, PLUGIN_FOLDER.path) # Should be redundant, but need to be sur
 
 #print("PLUGIN PATH:", __path__)
 
+
 class _BootstrapPluginManager(object):
 
 	def __init__(self):
 		self._extendables = []
 
-	def _new_extendable(self, extendable):
+	def register_new_extendable(self, extendable):
 		self._extendables.append(extendable)
 
 
@@ -92,9 +88,12 @@ _bootstrappluginmanager = _BootstrapPluginManager()
 PluginManager = _bootstrappluginmanager
 
 
-def extendable(*extension_bases):
+def extendable(*extension_bases, register_after_init=True):
 	'''Class decorator to mark a class as "extendable"
 	@param extension_bases: base classes for extensions
+	@param register_after_init: if C{True} the class is registered with the L{PluginManager}
+	directly after it's C{__init__()} method has run. If C{False} the class
+	can call C{PluginManager.register_new_extendable(self)} explicitly whenever ready.
 	'''
 	assert all(issubclass(ec, ExtensionBase) for ec in extension_bases)
 
@@ -102,10 +101,17 @@ def extendable(*extension_bases):
 		orig_init = cls.__init__
 
 		def _init_wrapper(self, *arg, **kwarg):
+			self._zim_extendable_registered = False
+			if not hasattr(self, '__zim_extension_objects__'):
+				self.__zim_extension_objects__ = []
+				# Must be before orig_init to allow init to add "built-in"
+				# extensions for discoverability of actions (e.g. mainwindow._uiactions)
 			orig_init(self, *arg, **kwarg)
 			self.__zim_extension_bases__ = extension_bases
-			self.__zim_extension_objects__ = []
-			PluginManager._new_extendable(self)
+				# Must be after orig_init to allow sub-classes of extendables
+				# to override the parent class
+			if register_after_init:
+				PluginManager.register_new_extendable(self)
 
 		cls.__init__ = _init_wrapper
 
@@ -158,9 +164,35 @@ def find_action(obj, actionname):
 		raise ValueError('Action not found: %s' % actionname)
 
 
+def list_actions(obj):
+	'''List actions
+	Returns list of actions of C{obj} followed by all actions of
+	all of it's extensions. Each action is a 2-tuple of the action and it's name.
+	'''
+	actions = get_actions(obj)
+	if hasattr(obj, '__zim_extension_objects__'):
+		for e in obj.__zim_extension_objects__:
+			actions.extend(get_actions(e))
+	return actions
+
+
+def get_plugin_key(obj):
+	'''Tries to determine the plugin key for C{obj}
+	Derives the name from C{__module__}
+	Raises C{AssertionError} on failure
+	'''
+	parts = obj.__module__.split('.')
+	if 'plugins' in parts:
+		i = parts.index('plugins')
+		return parts[i+1]
+	else:
+		raise AssertionError('Cannot determine plugin for %s, (%s)' % (obj, obj.__module__))
+
+
 class ExtensionBase(SignalEmitter, ConnectorMixin):
 	'''Base class for all extensions classes
 	@ivar plugin: the plugin object to which this extension belongs
+	@ivar obj: the extendable object
 	'''
 
 	__signals__ = {}
@@ -171,6 +203,7 @@ class ExtensionBase(SignalEmitter, ConnectorMixin):
 		@param obj: the object being extended
 		'''
 		self.plugin = plugin
+		self.obj = obj
 		obj.__zim_extension_objects__.append(self)
 
 	def destroy(self):
@@ -198,6 +231,8 @@ class ExtensionBase(SignalEmitter, ConnectorMixin):
 			pass
 		except ValueError:
 			pass
+		finally:
+			PluginManager.emit('extensions-changed', self.obj)
 
 		self.plugin.extensions.discard(self)
 			# Avoid waiting for garbage collection to take place
@@ -271,6 +306,7 @@ class InsertedObjectTypeMap(SignalEmitter):
 
 	# Note: Wanted to inherit from collections.abc.Mapping
 	#       but conflicts with metaclass use for SignalEmitter
+	# .. fixing using _MyMeta gives other issues ...
 
 	__signals__ = {
 		'changed': (SIGNAL_RUN_LAST, None, ()),
@@ -296,7 +332,7 @@ class InsertedObjectTypeMap(SignalEmitter):
 		return [k for k in self]
 
 	def items(self):
-		return [(k, self[v]) for k in self]
+		return [(k, self[k]) for k in self]
 
 	def values(self):
 		return [self[k] for k in self]
@@ -310,6 +346,7 @@ class InsertedObjectTypeMap(SignalEmitter):
 		@raises AssertionError: if another object already uses the same name
 		'''
 		key = objecttype.name.lower()
+		logger.debug('register_object: "%s"', key)
 		if key in self._objects:
 			raise AssertionError('InsertedObjectType "%s" already defined by %s' % (key, self._objects[key]))
 		else:
@@ -321,18 +358,28 @@ class InsertedObjectTypeMap(SignalEmitter):
 		@param objecttype: an object derived from L{InsertedObjectType}
 		'''
 		key = objecttype.name.lower()
+		logger.debug('unregister_object: "%s"', key)
 		if key in self._objects and self._objects[key] is objecttype:
 			self._objects.pop(key)
 			self.emit('changed')
 
 
-class PluginManagerClass(ConnectorMixin, abc.Mapping):
+class _MyMeta(type(SignalEmitter), type(abc.Mapping)):
+	# Combine meta classes to resolve conflict
+	pass
+
+
+class PluginManagerClass(ConnectorMixin, SignalEmitter, abc.Mapping, metaclass=_MyMeta):
 	'''Manager that maintains a set of active plugins
 
 	This class is the interface towards the rest of the application to
 	load/unload plugins. It behaves as a dictionary with plugin object names as
 	keys and plugin objects as value
 	'''
+
+	__signals__ = {
+		'extensions-changed': (SIGNAL_RUN_LAST, None, (object,)),
+	}
 
 	def __init__(self):
 		'''Constructor
@@ -351,10 +398,23 @@ class PluginManagerClass(ConnectorMixin, abc.Mapping):
 		self._preferences.setdefault('plugins', [])
 
 		self._plugins = {}
-		self._extendables = WeakSet()
+		self._extendable_weakrefs = []
 		self.failed = set()
 
 		self.insertedobjects = InsertedObjectTypeMap()
+
+	def _extendables(self):
+		# Used WeakSet before, but order of loading is important. This method
+		# returns the alive objects and cleans up the list in one go
+		extendables = []
+		weakrefs = []
+		for ref in self._extendable_weakrefs:
+			ext = ref()
+			if ext is not None:
+				extendables.append(ext)
+				weakrefs.append(ref)
+		self._extendable_weakrefs = weakrefs
+		return extendables
 
 	def load_plugins_from_preferences(self, names):
 		'''Calls L{load_plugin()} for each plugin in C{names} but does not
@@ -420,23 +480,28 @@ class PluginManagerClass(ConnectorMixin, abc.Mapping):
 		mod = get_module(modname)
 		return lookup_subclass(mod, PluginClass)
 
-	def _new_extendable(self, obj):
-		'''Let any plugin extend the object instance C{obj}
-		Will also remember the object (by a weak reference) such that
-		plugins loaded after this call will also be called to extend
-		C{obj} on their construction
-		@param obj: arbitrary object that can be extended by plugins
+	def register_new_extendable(self, obj):
+		'''Register an extendable object
+		This is called automatically by the L{extendable()} class decorator
+		unless the option c{register_after_init} was set to C{False}.
+		Relies on C{obj} already being setup correctly by the L{extendable} decorator.
 		'''
 		logger.debug("New extendable: %s", obj)
-		assert not obj in self._extendables
+		assert not obj in self._extendables()
 
+		count = 0
 		for name, plugin in sorted(self._plugins.items()):
 			# sort to make operation predictable
-			self._extend(plugin, obj)
+			count += self._extend(plugin, obj)
 
-		self._extendables.add(obj)
+		if count > 0:
+			self.emit('extensions-changed', obj)
+
+		self._extendable_weakrefs.append(weakref.ref(obj))
+		obj._zim_extendable_registered = True
 
 	def _extend(self, plugin, obj):
+		count = 0
 		for ext_class in plugin.extension_classes:
 			if issubclass(ext_class, obj.__zim_extension_bases__):
 				logger.debug("Load extension: %s", ext_class)
@@ -446,6 +511,8 @@ class PluginManagerClass(ConnectorMixin, abc.Mapping):
 					logger.exception('Failed loading extension %s for plugin %s', ext_class, plugin)
 				else:
 					plugin.extensions.add(ext)
+					count += 1
+		return count
 
 	def load_plugin(self, name):
 		'''Load a single plugin by name
@@ -470,8 +537,10 @@ class PluginManagerClass(ConnectorMixin, abc.Mapping):
 		plugin = klass()
 		self._plugins[name] = plugin
 
-		for obj in self._extendables:
-			self._extend(plugin, obj)
+		for obj in self._extendables():
+			count = self._extend(plugin, obj)
+			if count > 0:
+				self.emit('extensions-changed', obj)
 
 		if not name in self._preferences['plugins']:
 			self._preferences['plugins'].append(name)
@@ -501,7 +570,7 @@ class PluginManagerClass(ConnectorMixin, abc.Mapping):
 
 PluginManager = PluginManagerClass()  # singleton
 for _extendable in _bootstrappluginmanager._extendables:
-	PluginManager._new_extendable(_extendable)
+	PluginManager.register_new_extendable(_extendable)
 del _bootstrappluginmanager
 del _extendable
 
@@ -625,7 +694,7 @@ class PluginClass(ConnectorMixin):
 		assert 'name' in self.plugin_info, 'Missing "name" in plugin_info'
 		assert 'description' in self.plugin_info, 'Missing "description" in plugin_info'
 		assert 'author' in self.plugin_info, 'Missing "author" in plugin_info'
-		self.extensions = WeakSet()
+		self.extensions = weakref.WeakSet()
 
 		if self.plugin_preferences:
 			assert isinstance(self.plugin_preferences[0], tuple), 'BUG: preferences should be defined as tuples'
@@ -655,7 +724,9 @@ class PluginClass(ConnectorMixin):
 			else:
 				key, type, label, default, check = pref
 
-			if type in ('int', 'choice'):
+			if label is None:
+				pass # Hidden options
+			elif type in ('int', 'choice'):
 				fields.append((key, type, label, check))
 			else:
 				fields.append((key, type, label))
@@ -704,7 +775,7 @@ class PluginClass(ConnectorMixin):
 		This should revert any changes the plugin made to the
 		application (although preferences etc. can be left in place).
 		'''
-		for obj in self.extensions:
+		for obj in list(self.extensions):
 			obj.destroy()
 
 		try:
@@ -718,3 +789,14 @@ class PluginClass(ConnectorMixin):
 		Can be implemented by sub-classes.
 		'''
 		pass
+
+	def show_preferences(self, widget):
+		'''Convenience method to show the preferences dialog for this plugin
+		@param widget: C{Gtk.Widget} used to find toplevel window
+		'''
+		mykey = get_plugin_key(self)
+		window = widget.get_toplevel()
+		if not window:
+			raise AssertionError('Need toplevel which supports "show_preferences" action - no window')
+		action = find_action(window, 'show_preferences')
+		action(select_plugin=mykey)

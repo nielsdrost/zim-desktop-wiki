@@ -32,7 +32,9 @@ For the name keyword a '*' is allowed on both sides
 For content '*' can occur on both sides, but does not match whitespace
 '''
 
+# TODO keyword for recent changes "changed>=date" - see KQl for inspiration
 # TODO keyword for deadlinks, keyword for pages with no content
+#     "no:links" "no:content" ?
 
 # Queries are parsed into trees of groups of search terms
 # Terms have a keyword and a string to look for
@@ -46,11 +48,12 @@ For content '*' can occur on both sides, but does not match whitespace
 import re
 import logging
 
-from zim.parsing import split_quoted_strings, unescape_quoted_string, Re
+from zim.parse.encode import unescape_string
 from zim.notebook import Path, \
 	PageNotFoundError, IndexNotFoundError, \
 	LINK_DIR_BACKWARD, LINK_DIR_FORWARD
 
+from zim.plugins import PluginManager
 
 logger = logging.getLogger('zim.search')
 
@@ -74,9 +77,9 @@ KEYWORDS = (
 	'links', 'linksfrom', 'linksto', 'tag'
 )
 
-keyword_re = Re('(' + '|'.join(KEYWORDS) + '):(.*)', re.I)
-operators_re = Re(r'^(\|\||\&\&|\+|\-)')
-tag_re = Re(r'^\@(\w+)$', re.U)
+keyword_re = re.compile('(' + '|'.join(KEYWORDS) + '):(.*)', re.I)
+operators_re = re.compile(r'^(\|\||\&\&|\+|\-)')
+tag_re = re.compile(r'^\@(\w+)$', re.U)
 
 class QueryTerm(object):
 	'''Wrapper for a single term in a query. Consists of a keyword,
@@ -115,6 +118,48 @@ class QueryGroup(list):
 			self[:] = terms
 
 
+_word_re = re.compile(r'''
+	(	'(\\'|[^'])*' |  # single quoted word
+		"(\\"|[^"])*" |  # double quoted word
+		[^\s'"]+         # word without spaces
+	)''', re.X)
+
+
+def split_quoted_strings(string):
+	'''Split a word list respecting quotes, does not remove the quotes
+
+	Allow both double and single quotes
+
+	This function always expect full words to be quoted, even if quotes
+	appear in the middle of a word, they are considered word
+	boundries.
+	'''
+	string = string.strip()
+	words = []
+	m = _word_re.match(string)
+	while m:
+		words.append(m.group(0))
+		i = m.end()
+		string = string[i:].lstrip()
+		m = _word_re.match(string)
+
+	if string:
+		words += string.split() # unmatched quote ?
+
+	return [w for w in words if w]
+
+
+def unescape_quoted_string(string):
+	'''Removes quotes from a string and unescapes embedded quotes
+	@returns: string
+	'''
+	if not string:
+		return string
+	elif string[0] in ('"', "'") and string[-1] == string[0]:
+		string = string[1:-1]
+	return unescape_string(string)
+
+
 class Query(object):
 	'''This class wraps a query as typed by the user. It parses the
 	query into a tree of QueryGroup and QueryTerm objects. The 'root'
@@ -125,27 +170,30 @@ class Query(object):
 	def __init__(self, string):
 		self.string = string
 		self.root = self._parse_query(string)
+		self.find_input = self._generate_find_input()
 
 	def _parse_query(self, string):
 		# First do a raw tokenizer
-		words = split_quoted_strings(string, unescape=False, strict=False)
+		words = split_quoted_strings(string)
 		tokens = []
 		while words:
-			if operators_re.match(words[0]):
-				w = operators_re[0]
+			m_op = operators_re.match(words[0])
+			if m_op:
+				w = m_op.group()
 				words[0] = words[0][len(w):]
 			else:
 				w = words.pop(0)
 
+			m_key = keyword_re.match(w)
 			if w.lower() in operators:
 				tokens.append(operators[w.lower()])
-			elif keyword_re.match(w):
-				keyword = keyword_re[1].lower()
-				if not (keyword_re[2] or words):
+			elif m_key:
+				keyword = m_key.group(1).lower()
+				if not (m_key.group(2) or words):
 					# edge case - something ending in ":" but nothing following
-					tokens.append(QueryTerm('contentorname', keyword_re[1]+":")) # default keyword
+					tokens.append(QueryTerm('contentorname', m_key.group(1)+":")) # default keyword
 				else:
-					string = keyword_re[2] or words.pop(0)
+					string = m_key.group(2) or words.pop(0)
 					string = unescape_quoted_string(string)
 					if keyword == 'links':
 						keyword = 'linksfrom'
@@ -198,19 +246,31 @@ class Query(object):
 		#~ print root
 		return root
 
-	@property
-	def simple_match(self):
-		'''Used to determine a simple matching string to be used
-		in the find method in the pageview. Used by L{SearchDialog}
-		to set the L{PageView} find string to highligh matches in the page.
-		'''
-		# TODO make this return a list with positive terms for content
-		# if find supports an OR operator, highlight them all
-		if len(self.root) == 1 and isinstance(self.root[0], QueryTerm) \
-		and self.root[0].keyword in ('content', 'contentorname'):
-			return self.root[0].string
+	def _generate_find_input(self):
+		# parse query and format as a string or regex for the pageview "find"
+		# function - used to highlight matches in the pageview
+		strings = list(self._walk_text_content(self.root))
+		if not strings:
+			return None, None
+		elif len(strings) == 1:
+			return strings[0], False
 		else:
-			return None
+			return '|'.join(re.escape(s) for s in strings if s), True
+
+	def _walk_text_content(self, group):
+		for member in group:
+			if isinstance(member, QueryGroup):
+				for s in self._walk_text_content(member): # recurs
+					yield s
+			else: # QueryTerm
+				if member.inverse: # OPERATOR_NOT
+					pass
+				elif member.keyword in ('content', 'contentorname'):
+					yield member.string.strip('*') # strip "*" for partial matches
+				elif member.keyword == 'tag':
+					yield '@' + member.string.lstrip('@').strip('*')
+				else:
+					pass # other terms select pages, but no (easy) match in the page
 
 
 class PageSelection(set):
@@ -352,8 +412,26 @@ class SearchSelection(PageSelection):
 				self.cancelled = True
 				return results or set()
 
+		# If enabled, use the indexed_fts plugin for fast content search
+		if "indexed_fts" in PluginManager:
+			logger.debug("Searching using Indexed FTS plugin")
+			process_index_fts = PluginManager["indexed_fts"].process_index_fts
+
+			# For AND sets, scope will contain the results so far, and
+			# results only contains stuff from the contentorname query
+			# (which we don't need here)
+			# For OR sets, results is whatever was found so far, and should
+			# be extended with matches inside scope.
+			for term in contentterms:
+				if group.operator == OPERATOR_AND:
+					results, scope = self._and_operator(scope, scope,
+						process_index_fts(self, term, scope))
+				else:
+					results, scope = self._or_operator(results, scope,
+						process_index_fts(self, term, scope))
+
 		# Now do the content terms all at once per page - slow or very slow
-		if contentterms:
+		elif contentterms:
 			results = self._process_content(
 				contentterms, results, scope, group.operator, callback)
 
@@ -495,16 +573,18 @@ class SearchSelection(PageSelection):
 			term.content_regex = self._content_regex(term.string)
 			# term.name_regex already defined in _process_from_index
 
+		def page_generator(paths):
+			for path in paths:
+				try:
+					yield self.notebook.get_page(path)
+				except:
+					logger.exception('Exception opening: %s', path)
+					continue
+
 		if scope:
-			def page_generator():
-				for path in scope:
-					try:
-						yield self.notebook.get_page(path)
-					except PageNotFoundError:
-						pass
-			generator = page_generator()
+			generator = page_generator(scope)
 		else:
-			generator = list(map(self.notebook.get_page, self.notebook.pages.walk()))
+			generator = page_generator(self.notebook.pages.walk())
 
 		if results is None:
 			results = SearchSelection(None)
@@ -514,7 +594,7 @@ class SearchSelection(PageSelection):
 			try:
 				tree = page.get_parsetree()
 			except:
-				logger.exception('Exception while reading: %s', page)
+				logger.exception('Exception reading: %s', page)
 				continue
 
 			if tree is None:

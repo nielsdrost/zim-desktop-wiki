@@ -35,7 +35,11 @@ def zim_modules():
 class TestGit(tests.TestCase):
 
 	def runTest(self):
-		unknown = subprocess.check_output(['git', 'clean', '-dn'])
+		try:
+			unknown = subprocess.check_output(['git', 'clean', '-dn'])
+		except FileNotFoundError:
+			self.skipTest('git not found')
+
 		if unknown:
 			unknown = unknown.decode(sys.getfilesystemencoding())
 			raise AssertionError('File unknown to git - need to be added or ignored:\n' + unknown)
@@ -62,7 +66,7 @@ class TestDist(tests.TestCase):
 
 		# Check desktop file
 		try:
-			subprocess.check_call(['desktop-file-validate', 'xdg/zim.desktop'])
+			subprocess.check_call(['desktop-file-validate', 'xdg/org.zim_wiki.Zim.desktop'])
 		except OSError:
 			print("Could not run desktop-file-validate")
 
@@ -72,10 +76,9 @@ class TestDist(tests.TestCase):
 #~
 	#~ def runTest(self):
 		#~ '''Test if included notebooks are up to date'''
-		#~ from zim.fs import Dir
+		#~ from zim.newfs import LocalFolder
 		#~ from zim.notebook import init_notebook
-		#~ path = 'data/manual'
-		#~ notebook = init_notebook(Dir(path))
+		#~ notebook = init_notebook(LocalFolder('data/manual'))
 		#~ self.assertTrue(not notebook.needs_upgrade)
 
 
@@ -109,7 +112,7 @@ class TestCoding(tests.TestCase):
 
 	def testWrongDependencies(self):
 		'''Check clean dependencies'''
-		allow_gtk = ('zim/gui/', 'zim/inc/', 'zim/plugins/', 'tests/')
+		allow_gtk = ('zim/gui/', 'zim/inc/', 'zim/plugins/', 'tests/', 'zim/main/application')
 		#import_re = re.compile('^from gi.repository import (Gtk|Gdk|Gio|GObject)', re.M)
 		import_re = re.compile('^from gi.repository import (Gtk|Gdk|Gio)', re.M)
 			# only match global imports - allow import in limited scope
@@ -142,7 +145,7 @@ class TestCoding(tests.TestCase):
 				self.assertFalse('Gtk.Clipboard(' in code, '%s uses Gtk.Clipboard - use zim.gui.clipboard.Clipboard instead' % file)
 
 			if not file.endswith('config.py'):
-				self.assertFalse('os.environ\[' in code, '%s uses os.environ - use zim.config.get_environ() instead' % file)
+				self.assertFalse('os.environ\\[' in code, '%s uses os.environ - use zim.config.get_environ() instead' % file)
 
 	def testIndenting(self):
 		# FIXME need real parser to be more robust for comments, multi-line strings etc.
@@ -170,6 +173,11 @@ class TestCoding(tests.TestCase):
 		for file, code in self.list_code():
 			if 'logger.' in code:
 				assert 'logger = logging.getLogger(' in code, 'Forgot to define "logger" in %s' % file
+
+	def testKeys(self):
+		for file, code in self.list_code():
+			if file.startswith('zim'):
+				self.assertFalse('<Ctrl>' in code, '%s uses "<Ctrl>" - use "<Primary>" instead' % file)
 
 
 @tests.expectedFailure
@@ -246,7 +254,7 @@ class TestDocumentation(tests.TestCase):
 		if 'signal' in fields:
 			for spec in fields['signal']:
 				# e.g.  "C{signal-name (L{Page}, L{Path})}: Emitted when opening"
-				if not re.match('^C{[\w-]+ \(.*?\)\}:', spec):
+				if not re.match(r'^C{[\w-]+ \(.*?\)\}:', spec):
 					self.fail('Signal description in %s does not follow templates\n'
 					'Is: %s\nShould be like "C{signal-name (arg1, arg2)}: description"'
 					% (name, spec)
@@ -274,7 +282,7 @@ class TestDocumentation(tests.TestCase):
 		# Parse files same as epydoc - and check them on the fly
 		fields = {}
 		for line in doc.splitlines():
-			m = re.match('@(\w+)\s*(.*?):', line)
+			m = re.match(r'@(\w+)\s*(.*?):', line)
 			if m:
 				line = line[m.end():].strip()
 				field, arg = m.group(1), m.group(2)
@@ -298,7 +306,7 @@ class TestDocumentation(tests.TestCase):
 						fields[field] = line
 				else:
 					self.fail('Doc for %s has unknown field @%s' % (name, field))
-			elif re.match('@(\w+)', line):
+			elif re.match(r'@(\w+)', line):
 				self.fail('Syntax error in docs for %s\nMissing \':\' in "%s"' % (name, line))
 			else:
 				pass

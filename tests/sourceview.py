@@ -10,6 +10,8 @@ from tests.pageview import setUpPageView
 from zim.notebook import Path
 from zim.formats import ParseTree, StubLinker
 from zim.formats.html import Dumper as HtmlDumper
+from zim.formats.markdown import Dumper as MarkdownDumper
+from zim.config import ConfigDict
 
 from zim.plugins import PluginManager
 from zim.plugins.sourceview import *
@@ -53,12 +55,12 @@ def dump():
 		self.assertTrue(pageview.textview.get_buffer().get_modified())
 
 		# test modification ends up in page
-		tree = pageview.get_parsetree()
+		tree = pageview.page.get_parsetree()
 		#print(tree.tostring())
-		elt = tree.find('object')
+		elt = tree.find_element('object')
 		self.assertIsNotNone(elt)
 		self.assertEqual(elt.attrib['type'], 'code')
-		self.assertEqual(elt.gettext(), 'some new code\n')
+		self.assertEqual(elt.content[0][1], 'some new code\n')
 
 	def testInsertCodeBlock(self):
 		window = setUpMainWindow(self.setUpNotebook(content={'Test': 'Test 123'}), path='Test')
@@ -73,9 +75,9 @@ def dump():
 		with tests.DialogContext(insert_code_block):
 			action.activate()
 
-		tree = window.pageview.get_parsetree()
+		tree = window.pageview.page.get_parsetree()
 		#print(tree.tostring())
-		elt = tree.find('object')
+		elt = tree.find_element('object')
 		self.assertIsNotNone(elt)
 		self.assertEqual(elt.attrib['type'], 'code')
 
@@ -94,9 +96,9 @@ def dump():
 		with tests.DialogContext(cancel_dialog):
 			action.activate()
 
-		tree = window.pageview.get_parsetree()
+		tree = window.pageview.page.get_parsetree()
 		#print(tree.tostring())
-		elt = tree.find('object')
+		elt = tree.find_element('object')
 		self.assertIsNone(elt)
 
 
@@ -138,8 +140,7 @@ class TestSourceViewObject(tests.TestCase):
 	def testDumpHtml(self):
 		xml = '''\
 <?xml version='1.0' encoding='utf-8'?>
-<zim-tree><object lang="python" linenumbers="false" type="code">
-def foo(a, b):
+<zim-tree><object lang="python" linenumbers="false" type="code">def foo(a, b):
 	print "FOO", a >= b
 
 </object></zim-tree>'''
@@ -148,6 +149,47 @@ def foo(a, b):
 		html = dumper.dump(tree)
 		#print('>>', html)
 		self.assertIn(
-			'<pre><code class="python">\ndef foo(a, b):\n\tprint "FOO", a &gt;= b\n\n</code></pre>',
+			'<pre><code class="python">def foo(a, b):\n\tprint "FOO", a &gt;= b\n\n</code></pre>',
 			''.join(html)
 		)
+
+	def testDumpMarkdown(self):
+		xml = '''\
+<?xml version='1.0' encoding='utf-8'?>
+<zim-tree><object lang="python" linenumbers="false" type="code">def foo(a, b):
+	print "FOO", a >= b
+
+</object></zim-tree>'''
+		tree = ParseTree().fromstring(xml)
+		dumper = MarkdownDumper(StubLinker())
+		text = dumper.dump(tree)
+		#print('>>', text)
+		self.assertIn(
+			'```python\n'
+			'def foo(a, b):\n'
+			'	print "FOO", a >= b\n'
+			'\n'
+			'```\n',
+			''.join(text)
+		)
+
+	def testDumpMarkdownFallback(self):
+		otype = SourceViewObjectType(MockPlugin(), MockObjectMap())
+		extreme = ''
+		for i in range(3, 12):
+			extreme = extreme + ('`' * i) + '\n'
+			extreme = extreme + ('~' * i) + '\n'
+		for data, wanted in (
+			("```\n", "~~~python\n```\n~~~\n"),
+			("```\n~~~\n", "````python\n```\n~~~\n````\n"),
+			(extreme, ''.join(['\t'+l for l in extreme.splitlines(True)])) # just indent
+		):
+			self.assertEqual(''.join(otype.format_markdown(None, {'lang': 'python'}, data)), wanted)
+
+class MockPlugin():
+	preferences = ConfigDict()
+
+class MockObjectMap():
+	__zim_extension_objects__ = []
+	def register_object(*a):
+		pass

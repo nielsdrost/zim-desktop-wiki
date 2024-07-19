@@ -10,16 +10,18 @@ import contextlib
 
 import logging
 
+from zim.parse.encode import url_encode
+
 logger = logging.getLogger('zim.newfs')
 
 
 from . import FS_SUPPORT_NON_LOCAL_FILE_SHARES
 
 from zim.errors import Error
-from zim.parsing import url_encode
+from zim.parse.encode import url_decode
 
 
-is_url_re = re.compile('^\w{2,}:/')
+is_url_re = re.compile(r'^\w{2,}:/')
 is_share_re = re.compile(r'^\\\\\w')
 
 
@@ -107,12 +109,12 @@ def _split_file_url(url):
 	if path.startswith('/localhost/'): # exact 2 '/' before 'localhost'
 		path = path[11:]
 		isshare = False
-	elif scheme == 'smb' or re.match('^/\w', path): # exact 2 '/' before 'localhost'
+	elif scheme == 'smb' or re.match(r'^/\w', path): # exact 2 '/' followed by hostname
 		isshare = True
 	else:
 		isshare = False # either 'file:/' or 'file:///'
 
-	return path.strip('/').split('/'), isshare
+	return url_decode(path).strip('/').split('/'), isshare
 
 
 def _splitnormpath(path, force_rel=False):
@@ -143,7 +145,10 @@ def _splitnormpath(path, force_rel=False):
 		if name == '.' and names:
 			pass
 		elif name == '..':
-			if names and names[-1] != '..':
+			if names and names[-1] == '.':
+				names[-1] = name # e.g. "./../foo" --> ['..', 'foo']
+				makeroot = False
+			elif names and names[-1] != '..':
 				names.pop()
 			else:
 				names.append(name)
@@ -162,10 +167,11 @@ def _splitnormpath(path, force_rel=False):
 
 
 if os.name == 'nt':
-	def _joinabspath(names):
+	def _joinabspath(names, origpath=None):
+		# "origpath" is only used for better readable error message
 		# first element must be either drive letter or UNC host
 		if not re.match(r'^(\w:|\\\\\w)', names[0]):
-			raise ValueError('Not an absolute path: %s' % '\\'.join(names))
+			raise ValueError('Not an absolute path: %s' % (origpath or '\\'.join(names)))
 		else:
 			return '\\'.join(names) # Don't rely on SEP here, msys sets it to '/'
 
@@ -179,13 +185,14 @@ if os.name == 'nt':
 			return 'file://' + url_encode(names[0].strip('\\') + '/' + '/'.join(names[1:]))
 
 else:
-	def _joinabspath(names):
+	def _joinabspath(names, origpath=None):
+		# "origpath" is only used for better readable error message
 		if names[0].startswith('\\\\'):
 			return '\\'.join(names) # Windows share drive
 		elif names[0].startswith('/'):
 			return '/'.join(names)
 		else:
-			raise ValueError('Not an absolute path: %s' % '/'.join(names))
+			raise ValueError('Not an absolute path: %s' % (origpath or '/'.join(names)))
 
 	def _joinuri(names):
 		if names[0][0] == '/':
@@ -213,6 +220,15 @@ def _os_expanduser(path):
 			return path
 
 
+def is_abs_filepath(string):
+	try:
+		_joinabspath(_splitnormpath(string), origpath=string)
+	except ValueError:
+		return False
+	else:
+		return True
+
+
 class FilePath(object):
 	'''Class to represent filesystem paths and the base class for all
 	file and folder objects. Contains methods for file path manipulation.
@@ -220,7 +236,8 @@ class FilePath(object):
 	File paths should always be absolute paths and can e.g. not start
 	with "../" or "./". On windows they should always start with either
 	a drive letter or a share drive. On unix they should start at the
-	root of the filesystem.
+	root of the filesystem. To resolve relative filepaths, see e.g.
+	L{get_abspath()} and L{get_childpath()}.
 
 	Paths can be handled either as strings representing a local file
 	path ("/" or "\" separated), strings representing a file uri
@@ -232,7 +249,7 @@ class FilePath(object):
 	def __init__(self, path):
 		if isinstance(path, (tuple, list, str)):
 			self.pathnames = _splitnormpath(path)
-			self.path = _joinabspath(self.pathnames)
+			self.path = _joinabspath(self.pathnames, origpath=path)
 		elif isinstance(path, FilePath):
 			self.pathnames = path.pathnames
 			self.path = path.path
@@ -282,6 +299,16 @@ class FilePath(object):
 			return '~' + SEP + self.relpath(_HOME)
 		else:
 			return self.path
+
+	def parent(self):
+		dirname = self.dirname
+		return FilePath(dirname) if dirname else None
+
+	def parents(self):
+		parent = self.parent()
+		while parent:
+			yield parent
+			parent = parent.parent()
 
 	def get_childpath(self, path):
 		assert path
@@ -406,15 +433,17 @@ class FSObjectBase(FilePath, metaclass=FSObjectMeta):
 		logger.debug('Cross FS type move %s --> %s', (self, other))
 		self._copyto(other)
 		self.remove()
+		return other
 
 	def remove(self, cleanup=True):
 		raise NotImplementedError
 
 	def _cleanup(self):
-		try:
-			self.parent().remove()
-		except (ValueError, FolderNotEmptyError):
-			pass
+		for parent in self.parents():
+			try:
+				parent.remove()
+			except FolderNotEmptyError:
+				break
 
 
 class Folder(FSObjectBase):
@@ -541,53 +570,87 @@ class Folder(FSObjectBase):
 
 xdgmime = None
 mimetypes = None
-if os.name == 'nt':
-	# On windows even if xdg is installed, the database is not (always)
-	# well initialized, so always fallback to mimetypes
-	import mimetypes
-else:
-	try:
-		import xdg.Mime as xdgmime
-	except ImportError:
-		logger.info("Can not import 'xdg.Mime' - falling back to 'mimetypes'")
+try:
+	import xdg.Mime as xdgmime
+	mytype = xdgmime.get_type('image.png', name_pri=80)
+	if str(mytype) != 'image/png':
+		# Even if xdg is installed, the database is not (always) initialized
+		logger.debug("Found 'xdg.Mime', but no database - falling back to 'mimetypes'")
+		xdgmime = None
 		import mimetypes
+except ImportError:
+	logger.debug("Can not import 'xdg.Mime' - falling back to 'mimetypes'")
+	import mimetypes
+
+#: Extensions to determine text mimetypes - used in L{File.istext()}
+TEXT_EXTENSIONS = {
+	'txt': 'text/plain',
+	'md': 'text/markdown',
+	'markdown': 'text/markdown',
+}
 
 #: Extensions to determine image mimetypes - used in L{File.isimage()}
-IMAGE_EXTENSIONS = (
+IMAGE_EXTENSIONS = {
 	# Gleaned from Gdk.get_formats()
-	'bmp', # image/bmp
-	'gif', # image/gif
-	'icns', # image/x-icns
-	'ico', # image/x-icon
-	'cur', # image/x-icon
-	'jp2', # image/jp2
-	'jpc', # image/jp2
-	'jpx', # image/jp2
-	'j2k', # image/jp2
-	'jpf', # image/jp2
-	'jpeg', # image/jpeg
-	'jpe', # image/jpeg
-	'jpg', # image/jpeg
-	'pcx', # image/x-pcx
-	'png', # image/png
-	'pnm', # image/x-portable-anymap
-	'pbm', # image/x-portable-anymap
-	'pgm', # image/x-portable-anymap
-	'ppm', # image/x-portable-anymap
-	'ras', # image/x-cmu-raster
-	'tga', # image/x-tga
-	'targa', # image/x-tga
-	'tiff', # image/tiff
-	'tif', # image/tiff
-	'wbmp', # image/vnd.wap.wbmp
-	'xbm', # image/x-xbitmap
-	'xpm', # image/x-xpixmap
-	'wmf', # image/x-wmf
-	'apm', # image/x-wmf
-	'svg', # image/svg+xml
-	'svgz', # image/svg+xml
-	'svg.gz', # image/svg+xml
-)
+	'bmp': 'image/bmp',
+	'gif': 'image/gif',
+	'icns': 'image/x-icns',
+	'ico': 'image/x-icon',
+	'cur': 'image/x-icon',
+	'jp2': 'image/jp2',
+	'jpc': 'image/jp2',
+	'jpx': 'image/jp2',
+	'j2k': 'image/jp2',
+	'jpf': 'image/jp2',
+	'jpeg': 'image/jpeg',
+	'jpe': 'image/jpeg',
+	'jpg': 'image/jpeg',
+	'pcx': 'image/x-pcx',
+	'png': 'image/png',
+	'pnm': 'image/x-portable-anymap',
+	'pbm': 'image/x-portable-anymap',
+	'pgm': 'image/x-portable-anymap',
+	'ppm': 'image/x-portable-anymap',
+	'ras': 'image/x-cmu-raster',
+	'tga': 'image/x-tga',
+	'targa': 'image/x-tga',
+	'tiff': 'image/tiff',
+	'tif': 'image/tiff',
+	'wbmp': 'image/vnd.wap.wbmp',
+	'xbm': 'image/x-xbitmap',
+	'xpm': 'image/x-xpixmap',
+	'wmf': 'image/x-wmf',
+	'apm': 'image/x-wmf',
+	'svg': 'image/svg+xml',
+	'svgz': 'image/svg+xml',
+	'svg.gz': 'image/svg+xml',
+	# Custom additions
+	'webp': 'image/webp',
+}
+
+
+def get_mimetype_from_path(path):
+	if '.' in path:
+		_, ext = path.rsplit('.', 1)
+		ext = ext.lower()
+		if ext in TEXT_EXTENSIONS:
+			return TEXT_EXTENSIONS[ext]
+		elif ext in IMAGE_EXTENSIONS:
+			return IMAGE_EXTENSIONS[ext]
+
+	if xdgmime:
+		mimetype = xdgmime.get_type(path, name_pri=80)
+		return str(mimetype)
+	else:
+		mimetype, encoding = mimetypes.guess_type(path, strict=False)
+		if encoding == 'gzip':
+			return 'application/x-gzip'
+		elif encoding == 'bzip2':
+			return 'application/x-bzip2'
+		elif encoding == 'compress':
+			return 'application/x-compress'
+		else:
+			return mimetype or 'application/octet-stream'
 
 
 def _md5(content):
@@ -613,15 +676,27 @@ class File(FSObjectBase):
 	def __iter__(self):
 		return iter(self.readlines())
 
+	def istext(self):
+		'''Check if this file is a text file
+		Convenience function for checking mimetype starts with 'text/'
+		Works even when no real mime-type suport is available.
+		@returns: C{True} when this is a text file
+		'''
+		if '.' in self.basename:
+			_, ext = self.basename.rsplit('.', 1)
+			if ext.lower() in TEXT_EXTENSIONS:
+				return True
+
+		return self.mimetype().startswith('text/')
+
 	def isimage(self):
-		'''Check if this is an image file. Convenience method that
-		works even when no real mime-type suport is available.
+		'''Check if this file is an image file
+		Convenience function for checking mimetype starts with 'image/'
+		Works even when no real mime-type suport is available.
 		If this method returns C{True} it is no guarantee
 		this image type is actually supported by Gtk.
 		@returns: C{True} when this is an image file
 		'''
-		# Quick shortcut to be able to load images in the gui even if
-		# we have no proper mimetype support
 		if '.' in self.basename:
 			_, ext = self.basename.rsplit('.', 1)
 			if ext.lower() in IMAGE_EXTENSIONS:
@@ -636,25 +711,17 @@ class File(FSObjectBase):
 		@returns: the mimetype as a string, e.g. "text/plain"
 		'''
 		if self._mimetype is None:
-			if xdgmime:
-				mimetype = xdgmime.get_type(self.path, name_pri=80)
-				self._mimetype = str(mimetype)
-			else:
-				mimetype, encoding = mimetypes.guess_type(self.path, strict=False)
-				if encoding == 'gzip':
-					mimetype = 'application/x-gzip'
-				elif encoding == 'bzip2':
-					mimetype = 'application/x-bzip2'
-				elif encoding == 'compress':
-					mimetype = 'application/x-compress'
-				self._mimetype = mimetype or 'application/octet-stream'
+			self._mimetype = get_mimetype_from_path(self.path)
 
 		return self._mimetype
 
 	def size(self):
 		raise NotImplementedError
 
-	def read(self):
+	def read(self, size=-1):
+		raise NotImplementedError
+
+	def readline(self, size=-1):
 		raise NotImplementedError
 
 	def readlines(self):

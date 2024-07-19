@@ -15,6 +15,12 @@ import gettext
 import xml.etree.cElementTree as etree
 import types
 import glob
+import logging
+
+logger = logging.getLogger('tests')
+
+from functools import partial
+
 
 try:
 	import gi
@@ -28,6 +34,7 @@ import unittest
 from unittest import skip, skipIf, skipUnless, expectedFailure
 
 
+os.environ['LANGUAGE'] = 'C.UTF-8'
 gettext.install('zim', names=('_', 'gettext', 'ngettext'))
 
 FAST_TEST = False #: determines whether we skip slow tests or not
@@ -38,45 +45,40 @@ __all__ = [
 	# Packaging etc.
 	'package', 'translations',
 	# Basic libraries
-	'datetimetz', 'utils', 'errors', 'signals', 'actions',
+	'datetimetz', 'base', 'errors', 'signals', 'actions',
 	'fs', 'newfs',
 	'config', 'applications',
-	'parsing', 'tokenparser',
+	'parsing',
 	# Notebook components
 	'formats', 'templates',
 	'indexers', 'indexviews', 'operations', 'notebook', 'history',
-	'export', 'www', 'search',
+	'export', 'import_files', 'www', 'search',
 	# Core application
 	'widgets', 'pageview', 'save_page', 'clipboard', 'uiactions',
 	'mainwindow', 'notebookdialog',
 	'preferencesdialog', 'searchdialog', 'customtools', 'templateeditordialog',
 	'main', 'plugins',
 	# Plugins
-	'pathbar', 'pageindex',
+	'pathbar', 'pageindex', 'toolbar',
 	'journal', 'printtobrowser', 'versioncontrol', 'inlinecalculator',
 	'tasklist', 'tags', 'imagegenerators', 'tableofcontents',
 	'quicknote', 'attachmentbrowser', 'insertsymbol',
 	'sourceview', 'tableeditor', 'bookmarksbar', 'spell',
-	'arithmetic', 'linesorter'
+	'arithmetic', 'linesorter', 'commandpalette', 'windowtitleeditor',
+	'indexed_fts'
 ]
 
 
-mydir = os.path.abspath(os.path.dirname(__file__))
+_mydir = os.path.abspath(os.path.dirname(__file__))
 
 # when a test is missing from the list that should be detected
-for file in glob.glob(mydir + '/*.py'):
+for file in glob.glob(_mydir + '/*.py'):
 	name = os.path.basename(file)[:-3]
 	if name != '__init__' and not name in __all__:
 		raise AssertionError('Test missing in __all__: %s' % name)
 
-# get our own data dir
-DATADIR = os.path.abspath(os.path.join(mydir, 'data'))
-
-# and project data dir
-ZIM_DATADIR = os.path.abspath(os.path.join(mydir, '../data'))
-
 # get our own tmpdir
-TMPDIR = os.path.abspath(os.path.join(mydir, 'tmp'))
+TMPDIR = os.path.abspath(os.path.join(_mydir, 'tmp'))
 	# Wanted to use tempfile.get_tempdir here to put everything in
 	# e.g. /tmp/zim but since /tmp is often mounted as special file
 	# system this conflicts with thrash support. For writing in source
@@ -171,6 +173,14 @@ from zim.newfs import LocalFolder
 
 import zim.config.manager
 import zim.plugins
+
+
+# Define runtime folder & data folders for use in test cases
+ZIM_SRC_FOLDER = LocalFolder(_mydir + '/..')
+ZIM_DATA_FOLDER = LocalFolder(_mydir + '/../data')
+TEST_SRC_FOLDER = LocalFolder(_mydir)
+TEST_DATA_FOLDER = LocalFolder(_mydir + '/data')
+
 
 _zim_pyfiles = []
 
@@ -289,9 +299,9 @@ class TestCase(unittest.TestCase):
 		assert not folder.exists()
 		return folder
 
-	def setUpNotebook(self, name='notebook', mock=MOCK_ALWAYS_MOCK, content={}, folder=None):
+	def setUpNotebook(self, name='testnotebook', mock=MOCK_ALWAYS_MOCK, content={}, folder=None):
 		'''
-		@param name: name postfix for the folder, see L{setUpFolder}
+		@param name: name postfix for the folder, see L{setUpFolder}, and name for the notebook
 		@param mock: see L{setUpFolder}, default is C{MOCK_ALWAYS_MOCK}
 		@param content: dictionary where the keys are page names and the
 		values the page content. If a tuple or list is given, pages are created
@@ -314,20 +324,20 @@ class TestCase(unittest.TestCase):
 		cache_dir = folder.folder('.zim')
 		layout = FilesLayout(folder, endofline='unix')
 
+		conffile = folder.file('notebook.zim')
+		config = NotebookConfig(conffile)
+		config.write()
 		if isinstance(folder, MockFolder):
-			conffile = folder.file('notebook.zim')
-			config = NotebookConfig(conffile)
 			index = Index(':memory:', layout)
 		else:
-			conffile = folder.file('notebook.zim')
-			config = NotebookConfig(conffile)
-			cache_dir.touch()
+			f = cache_dir.file('index.db')
 			index = Index(cache_dir.file('index.db').path, layout)
 
 		if isinstance(content, (list, tuple)):
 			content = dict((p, 'test 123') for p in content)
 
 		notebook = Notebook(cache_dir, config, folder, layout, index)
+		notebook.properties['name'] = name
 		for name, text in list(content.items()):
 			path = Path(name) if isinstance(name, str) else name
 			file, folder = layout.map_page(path)
@@ -343,16 +353,6 @@ class TestCase(unittest.TestCase):
 		notebook.index.check_and_update()
 		assert notebook.index.is_uptodate
 		return notebook
-
-	def create_tmp_dir(self, name=None):
-		'''Returns a path to a tmp dir where tests can write data.
-		The dir is removed and recreated empty every time this function
-		is called with the same name from the same class.
-		'''
-		print("Deprecated: TestCase.create_tmp_dir()")
-		folder = self.setUpFolder(name=name, mock=MOCK_ALWAYS_REAL)
-		folder.touch()
-		return folder.path
 
 	def _get_tmp_name(self, postfix):
 		name = self.__class__.__name__
@@ -377,7 +377,7 @@ class LoggingFilter(logging.Filter):
 
 	# Due to how the "logging" module works, logging channels do inherit
 	# handlers of parents but not filters. Therefore setting a filter
-	# on the "zim" channel will not surpress messages from sub-channels.
+	# on the "zim" channel will not supress messages from sub-channels.
 	# Instead we need to set the filter both on the channel and on
 	# top level handlers to get the desired effect.
 
@@ -467,12 +467,17 @@ class DialogContext(object):
 
 		if isinstance(handler, type): # is a class
 			self._default_handler(handler, dialog)
+		elif isinstance(handler, tuple):
+			klass, func = handler
+			self._default_handler(klass, dialog, func)
 		else: # assume a function
 			handler(dialog)
 
-	def _default_handler(self, cls, dialog):
+	def _default_handler(self, cls, dialog, func=None):
 		if not isinstance(dialog, cls):
 			raise AssertionError('Expected dialog of class %s, but got %s instead' % (cls, dialog.__class__))
+		if func:
+			func(dialog)
 		dialog.assert_response_ok()
 
 	def __exit__(self, *error):
@@ -491,7 +496,7 @@ class WindowContext(DialogContext):
 
 	def _default_handler(self, cls, window):
 		if not isinstance(window, cls):
-			raise AssertionError('Expected window of class %s, but got %s instead' % (cls, dialog.__class__))
+			raise AssertionError('Expected window of class %s, but got %s instead' % (cls, window.__class__))
 
 
 class ApplicationContext(object):
@@ -524,32 +529,10 @@ class ApplicationContext(object):
 		return False # Raise any errors again outside context
 
 
-class ZimApplicationContext(object):
+from zim.newfs.mock import os_native_path as _os_native_path
 
-	def __init__(self, *callbacks):
-		self.stack = list(callbacks)
-
-	def __enter__(self):
-		from zim.main import ZIM_APPLICATION
-		self.apps_obj = ZIM_APPLICATION
-		self.old_run = ZIM_APPLICATION._run_cmd
-		ZIM_APPLICATION._run_cmd = self._callback
-
-	def _callback(self, cmd, args):
-		if not self.stack:
-			raise AssertionError('Unexpected command run: %s %r' % (cmd, args))
-
-		handler = self.stack.pop(0)
-		handler(cmd, args)
-
-	def __exit__(self, *error):
-		self.apps_obj._run_cmd = self.old_run
-
-		if self.stack and not any(error):
-			raise AssertionError('%i expected command(s) not run' % len(self.stack))
-
-		return False # Raise any errors again outside context
-
+def os_native_path(path, drive='C:'):
+	return _os_native_path(path, drive)
 
 
 class _TestData(object):
@@ -650,7 +633,6 @@ def new_page():
 
 def new_page_from_text(text, format='wiki'):
 	from zim.notebook import Path, Page
-	from zim.notebook import Path, Page
 	from zim.newfs.mock import MockFile, MockFolder
 	file = MockFile('/mock/test/page.txt')
 	folder = MockFile('/mock/test/page/')
@@ -659,73 +641,119 @@ def new_page_from_text(text, format='wiki'):
 	return page
 
 
-class Counter(object):
-	'''Object that is callable as a function and keeps count how often
-	it was called.
+class MockObject(object):
+	'''Simple class to quickly create mock objects
+
+	It allows defining methods with a static return value and logs the calls
+	to the defined methods
+
+	Example usage:
+
+		myobject = MockObject(return_values={'foo': "test 123"})
+			# define an object with a single method "foo" which returns "test 123"
+		object_to_be_tested.some_method(myobject)
+		self.assertEqual(myobject.allMethodCalls, [('foo', 'abc')])
+			# assert method called with single argument
+
 	'''
 
-	def __init__(self, value=None):
+	def __init__(self, methods=(), return_values={}):
 		'''Constructor
-		@param value: the value to return when called as a function
+		@param methods: a list of method names that are to be supported; these
+		methods will do nothing and return a C{None} value
+		@param return_values: mapping of method names to return value for the
+		method. Names do not have to be defined in C{methods}.
 		'''
-		self.value = value
-		self.count = 0
+		self.allMethodCalls = []
+		self.__return_values = {}
 
-	def __call__(self, *arg, **kwarg):
-		self.count += 1
-		return self.value
+		for name in methods:
+			self.__return_values[name] = None
 
+		self.__return_values.update(return_values)
 
-class MockObjectBase(object):
-	'''Base class for mock objects.
+	@property
+	def lastMethodCall(self):
+		return self.allMethodCalls[-1]
 
-	Mock methods can be installed with L{mock_method()}. All method
-	calls to mock methods are logged, so they can be inspected.
-	The attribute C{mock_calls} has a list of tuples with mock methods
-	and arguments in order they have been called.
-	'''
+	def __getattr__(self, name):
+		'''Automatically mock methods'''
+		if not name in self.__return_values:
+			raise AttributeError('No such method defined for MockObject: %s (we do know %r)' % (name, self.__return_values.keys()))
 
-	def __init__(self):
-		self.mock_calls = []
-
-	def mock_method(self, name, return_value):
-		'''Installs a mock method with a given name that returns
-		a given value.
-		'''
+		return_value = self.__return_values[name]
 		def my_mock_method(*arg, **kwarg):
 			call = [name] + list(arg)
 			if kwarg:
 				call.append(kwarg)
-			self.mock_calls.append(tuple(call))
+			self.allMethodCalls.append(tuple(call))
 			return return_value
 
 		setattr(self, name, my_mock_method)
 		return my_mock_method
 
+	def addMockMethod(self, name, return_value=None):
+		'''Installs a mock method with a given name that returns
+		a given value.
+		'''
+		self.__return_values[name] = return_value
 
-class MockObject(MockObjectBase):
-	'''Simple subclass of L{MockObjectBase} that automatically mocks a
-	method which returns C{None} for any non-existing attribute.
-	Attributes that are not methods need to be initialized explicitly.
+
+class CallBackLogger(list):
+	'''Object that is callable as a function and keeps count how often
+	it was called and with what arguments
 	'''
 
-	def __init__(self, **methods):
-		MockObjectBase.__init__(self)
-		for name, value in methods.items():
-			self.mock_method(name, value)
+	def __init__(self, return_value=None):
+		'''Constructor
+		@param return_value: the value to return when called as a function
+		'''
+		self.return_value = return_value
+		self.count = 0
 
-	def __getattr__(self, name):
-		'''Automatically mock methods'''
-		if name == '__zim_extension_objects__':
-			raise AttributeError
-		else:
-			return self.mock_method(name, None)
+	@property
+	def hasBeenCalled(self):
+		return bool(self)
+
+	@property
+	def numberOfCalls(self):
+		return len(self)
+
+	def __call__(self, *arg, **kwarg):
+		self.count += 1
+
+		call = list(arg)
+		if kwarg:
+			call.append(kwarg)
+		self.append(tuple(call))
+
+		return self.return_value
 
 
-import logging
-logger = logging.getLogger('tests')
+def wrap_method_with_logger(object, name):
+	orig_function = getattr(object, name)
+	wrapper = CallBackWrapper(orig_function)
+	setattr(object, name, wrapper)
+	return wrapper
 
-from functools import partial
+
+class CallBackWrapper(CallBackLogger):
+
+	def __init__(self, orig_function):
+		assert orig_function is not None
+		self.count = 0
+		self.orig_function = orig_function
+
+	def __call__(self, *arg, **kwarg):
+		self.count += 1
+
+		call = list(arg)
+		if kwarg:
+			call.append(kwarg)
+		self.append(tuple(call))
+
+		return self.orig_function(*arg, **kwarg)
+
 
 class SignalLogger(dict):
 	'''Listening object that attaches to all signals of the target and records
@@ -779,35 +807,19 @@ class SignalLogger(dict):
 		self._ids = []
 
 
+class MaskedObject(object):
+	'''Proxy object that allows filtering what methods of an interface are
+	accesible.
 
-class CallBackLogger(dict):
-	'''Mock object that allows any method to be called as callback and
-	records the calls in a dictionary.
+	Example Usage:
+
+		myproxy = MaskedObject(realobject, ('connect', 'disconnect'))
+			# proxy only allows calling "connect()" and "disconnect()"
+			# other calls lead to exception
+
 	'''
 
-	def __init__(self, filter_func=None):
-		if filter_func is None:
-			filter_func = lambda n, a, kw: (a, kw)
-
-		self._filter_func = filter_func
-
-	def __getattr__(self, name):
-
-		def cb_method(*arg, **kwarg):
-			logger.debug('Callback %s %r %r', name, arg, kwarg)
-			self.setdefault(name, [])
-
-			self[name].append(
-				self._filter_func(name, arg, kwarg)
-			)
-
-		setattr(self, name, cb_method)
-		return cb_method
-
-
-class MaskedObject(object):
-
-	def __init__(self, obj, *names):
+	def __init__(self, obj, names):
 		self.__obj = obj
 		self.__names = names
 

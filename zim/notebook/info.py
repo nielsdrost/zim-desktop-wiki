@@ -2,20 +2,16 @@
 # Copyright 2008-2015 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 
-import os
 import re
 import logging
+from zim.parse.encode import url_encode
 
 logger = logging.getLogger('zim.notebook')
 
 
-import zim.fs
-
-from zim.fs import File, Dir, SEP
+from zim.newfs import SEP, FilePath, LocalFolder
 from zim.config import ConfigManager, INIConfigFile, XDGConfigFileIter, String
-from zim.parsing import is_url_re, is_win32_path_re, url_encode
-
-from .notebook import NotebookConfig, _resolve_relative_config
+from zim.parse.links import is_url_re, is_interwiki_keyword_re
 
 
 def get_notebook_list():
@@ -38,42 +34,29 @@ def resolve_notebook(string, pwd=None):
 	@returns: a L{NotebookInfo} or C{None}
 	'''
 	assert isinstance(string, str)
-	from zim.fs import isabs
 
 	if '/' in string or SEP in string:
-		# FIXME do we need a isfilepath() function in fs.py ?
 		if is_url_re.match(string):
 			uri = string
-		elif pwd and not isabs(string):
-			uri = pwd + SEP + string
+		elif pwd:
+			uri = LocalFolder(pwd).get_abspath(string).uri
 		else:
-			uri = string
+			uri = FilePath(string).uri # enforce absolute path
 		return NotebookInfo(uri)
 	else:
 		nblist = get_notebook_list()
 		return nblist.get_by_name(string)
 
 
-def _get_path_object(path):
-	if isinstance(path, str):
-		file = File(path)
-		if file.exists(): # exists and is a file
-			path = file
-		else:
-			path = Dir(path)
-	else:
-		assert isinstance(path, (File, Dir))
-	return path
-
-
 def get_notebook_info(path):
 	'''Look up the notebook info for either a uri,
-	or a File or a Dir object.
-	@param path: path as string, L{File} or L{Dir} object
+	or a File or a Folder object.
+	@param path: path as string, L{File} or L{Folder} object
 	@returns: L{NotebookInfo} object, or C{None} if no notebook config
 	was found
 	'''
-	path = _get_path_object(path)
+	if isinstance(path, str):
+		path = FilePath(path).uri # enforce absolute path
 	info = NotebookInfo(path.uri)
 	if info.update():
 		return info
@@ -81,11 +64,19 @@ def get_notebook_info(path):
 		return None
 
 
+def create_valid_interwiki_key(name):
+	key = re.sub(r'[^\w+\-.]', '_', name)
+	if key[0] in ('-', '.'):
+		key = '_' + key[1:] # "_" matches \w
+	return key
+
+
 def interwiki_link(link):
 	'''Convert an interwiki link into an url'''
 	assert isinstance(link, str) and '?' in link
 	key, page = link.split('?', 1)
-	lkey = key.lower()
+	if not is_interwiki_keyword_re.match(key):
+		return None
 
 	# First check known notebooks
 	list = get_notebook_list()
@@ -97,14 +88,18 @@ def interwiki_link(link):
 	else:
 		url = None
 		files = XDGConfigFileIter('urls.list') # FIXME, shouldn't this be passed in ?
+		lkey = key.lower()
 		for file in files:
 			for line in file.readlines():
 				if line.startswith('#') or line.isspace():
 					continue
+
 				try:
 					mykey, myurl = line.split(None, 1)
 				except ValueError:
 					continue
+
+				mykey = create_valid_interwiki_key(mykey)
 				if mykey.lower() == lkey:
 					url = myurl.strip()
 					break
@@ -128,7 +123,7 @@ class NotebookInfo(object):
 	'''This class keeps the info for a notebook
 
 	@ivar uri: The location of the notebook
-	@ivar user_path: The location of the notebook relative to the
+	@ivar userpath: The location of the notebook relative to the
 	home folder (starts with '~/') or C{None}
 	@ivar name: The notebook name (or the basename of the uri)
 	@ivar icon: The file uri for the notebook icon
@@ -151,7 +146,7 @@ class NotebookInfo(object):
 		object acts as a cache and L{update()} will only read the config
 		if it is newer than C{mtime}
 
-		@param uri: location uri or file path for the notebook (esp. C{user_path})
+		@param uri: location uri or file path for the notebook (esp. C{userpath})
 		@param name: notebook name
 		@param icon: the notebook icon path
 		@param mtime: the mtime when config was last read
@@ -162,15 +157,22 @@ class NotebookInfo(object):
 		if isinstance(uri, str) \
 		and is_url_re.match(uri) and not uri.startswith('file://'):
 			self.uri = uri
-			self.user_path = None
+			self.userpath = None
 			self.name = name
 		else:
-			f = File(uri)
+			f = FilePath(uri)
 			self.uri = f.uri
-			self.user_path = f.user_path # set to None when uri is not a file uri
+			self.userpath = f.userpath # set to None when uri is not a file uri
 			self.name = name or f.basename
 		self.icon_path = icon
-		self.icon = File(icon).uri
+		if icon:
+			try:
+				base = FilePath(self.uri)
+				self.icon = base.get_abspath(icon).uri
+			except ValueError:
+				logger.info("Not a valid path for notebook icon: %s" % icon)
+		else:
+			self.icon = None
 		self.mtime = mtime
 		self.interwiki = interwiki
 		self.active = None
@@ -197,7 +199,9 @@ class NotebookInfo(object):
 		@returns: C{True} when data was updated, C{False} otherwise
 		'''
 		# TODO support for paths that turn out to be files
-		dir = Dir(self.uri)
+		from .notebook import NotebookConfig, _resolve_relative_config
+		
+		dir = LocalFolder(self.uri)
 		file = dir.file('notebook.zim')
 		if file.exists() and file.mtime() != self.mtime:
 			config = NotebookConfig(file)
@@ -219,8 +223,7 @@ class NotebookInfo(object):
 
 
 class VirtualFile(object):
-	### TODO - proper class for this in zim.fs
-	###        unify with code in config manager
+	### TODO - use MockFile object?
 
 	def __init__(self, lines):
 		self.lines = lines
@@ -378,13 +381,13 @@ class NotebookInfoList(list):
 				if name == '_default_':
 					default = path
 				else:
-					uri = File(path).uri
+					uri = FilePath(path).uri
 					uris.append(uri)
 					if name == default:
 						defaulturi = uri
 
 		if default and not defaulturi:
-			defaulturi = File(default).uri
+			defaulturi = FilePath(default).uri
 
 		# Populate ourselves
 		for uri in uris:
@@ -397,7 +400,7 @@ class NotebookInfoList(list):
 	def write(self):
 		'''Write the config and cache'''
 		if self.default:
-			default = self.default.user_path or self.default.uri
+			default = self.default.userpath or self.default.uri
 		else:
 			default = None
 
@@ -407,12 +410,12 @@ class NotebookInfoList(list):
 		]
 		for i, info in enumerate(self):
 			n = i + 1
-			uri = info.user_path or info.uri
+			uri = info.userpath or info.uri
 			lines.append('%i=%s\n' % (n, uri))
 
 		for i, info in enumerate(self):
 			n = i + 1
-			uri = info.user_path or info.uri
+			uri = info.userpath or info.uri
 			lines.extend([
 				'\n',
 				'[Notebook %i]\n' % n,
@@ -436,7 +439,7 @@ class NotebookInfoList(list):
 		'''Set the default notebook
 		@param uri: the file uri or file path for the default notebook
 		'''
-		uri = File(uri).uri # e.g. "~/foo" to file:// uri
+		uri = FilePath(uri).uri # e.g. "~/foo" to file:// uri
 		for info in self:
 			if info.uri == uri:
 				self.default = info
@@ -474,9 +477,18 @@ class NotebookInfoList(list):
 		@param key: notebook name or interwiki key as string
 		@returns: a L{NotebookInfo} object or C{None}
 		'''
+		if not is_interwiki_keyword_re.match(key):
+			raise ValueError('Not a valid interwiki key: %s' % key)
+
 		lkey = key.lower()
+		by_name = []
 		for info in self:
-			if info.interwiki and info.interwiki.lower() == lkey:
+			if info.interwiki and create_valid_interwiki_key(info.interwiki.lower()) == lkey:
 				return info
+			elif create_valid_interwiki_key(info.name.lower()) == lkey:
+				by_name.append(info)
 		else:
-			return self.get_by_name(key)
+			if by_name:
+				return by_name[0]
+			else:
+				return None

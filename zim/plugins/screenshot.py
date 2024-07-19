@@ -1,26 +1,28 @@
 
-# Copyright 2009-2014 Jaap Karssenberg <jaap.karssenberg@gmail.com>
+# copyright 2009-2014 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 # Copyright 2014 Andri Kusumah
 
 
 import time
-from platform import os
+import platform
+import os
 
 from gi.repository import Gtk
 
 from zim.plugins import PluginClass
 from zim.actions import action
-from zim.fs import TmpFile
+from zim.newfs import TmpFile
 from zim.applications import Application
 
 from zim.gui.pageview import PageViewExtension
 from zim.gui.widgets import Dialog, ErrorDialog
 
 
-PLATFORM = os.name
+PLATFORM = platform.system()
 
 """
 TESTED:
+	- gnome-screenshot
 	- import (imagemagick)
 	- scrot
 UNTESTED:
@@ -28,10 +30,21 @@ UNTESTED:
 """
 COMMAND = 'import'
 SUPPORTED_COMMANDS_BY_PLATFORM = dict([
-	('posix', ('import', 'scrot', 'gnome-screenshot')),
-	('nt', ('boxcutter',)),
+	('Linux_Wayland', ('gnome-screenshot',)),
+	('Linux_X', ('import', 'scrot', 'gnome-screenshot')),
+	('Windows', ('boxcutter',)),
+	('Darwin', ('screencapture',)),
 ])
-SUPPORTED_COMMANDS = SUPPORTED_COMMANDS_BY_PLATFORM[PLATFORM]
+
+if PLATFORM == 'Linux':
+	if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+		platform = 'Linux_Wayland'
+	else:
+		platform = 'Linux_X'
+else:
+	platform = PLATFORM
+SUPPORTED_COMMANDS = SUPPORTED_COMMANDS_BY_PLATFORM[platform]
+
 if len(SUPPORTED_COMMANDS):
 	COMMAND = SUPPORTED_COMMANDS[0]  # set first available tool as default
 
@@ -58,9 +71,15 @@ class ScreenshotPicker(object):
 		}),
 		('gnome-screenshot', {
 			'select': ('--area',),
-			'full': ('--window',),
+			'full': (),
 			'delay': '--delay',
 			'file': '-f',
+		}),
+		('screencapture', {
+			'select': ('-i',),
+			'full': ('-T0',),
+			'delay': '-T',
+			'file': None,
 		}),
 	])
 	cmd_default = COMMAND
@@ -213,7 +232,7 @@ class InsertScreenshotDialog(Dialog):
 				name = time.strftime('screenshot_%Y-%m-%d-%H%M%S.png')
 				imgdir = self.notebook.get_attachments_dir(self.page)
 				imgfile = imgdir.new_file(name)
-				tmpfile.rename(imgfile)
+				tmpfile.moveto(imgfile)
 				pageview = self.pageview
 				pageview.insert_image(imgfile)
 			else:
@@ -221,7 +240,7 @@ class InsertScreenshotDialog(Dialog):
 							_('Some error occurred while running "%s"') % self.screenshot_command).run()
 				# T: Error message in "insert screenshot" dialog, %s will be replaced by application name
 
-		tmpfile.dir.touch()
+		tmpfile.parent().touch()
 		fileop = ScreenshotPicker.get_file_option(self.screenshot_command)
 		args = (fileop, tmpfile) if fileop else (tmpfile,)
 		helper.spawn(args, callback, tmpfile)

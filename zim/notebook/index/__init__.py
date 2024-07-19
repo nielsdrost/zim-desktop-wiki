@@ -16,7 +16,7 @@ except ImportError:
 
 from zim.newfs import LocalFile, File, Folder, FileNotFoundError
 from zim.signals import SignalEmitter
-from zim.utils import natural_sort_key
+from zim.base.naturalsort import natural_sort_key
 
 from zim.notebook.operations import NotebookOperation, NotebookOperationOngoing, ongoing_operation
 
@@ -83,6 +83,13 @@ class Index(SignalEmitter):
 		# NOTE: for a locked database, different errors happen on linux and
 		# on windows, so test both platforms when modifying here
 
+		if self.dbpath != ':memory:':
+			logger.debug('Connecting to database file: %s', self.dbpath)
+			file = LocalFile(self.dbpath)
+			file.parent().touch()
+		else:
+			logger.debug('Connecting to in-memory database')
+
 		try:
 			self._db = sqlite3.Connection(self.dbpath)
 		except:
@@ -101,19 +108,23 @@ class Index(SignalEmitter):
 			elif self.get_property('db_sortkey_format') != natural_sort_key(DB_SORTKEY_CONTENT):
 				logger.info('Index db_sortkey_format out of date')
 				self._db_init()
-			else:
-				self.set_property('db_version', DB_VERSION) # Ensure we can write
+
+			self.set_property('db_version', DB_VERSION) # Ensure we can write
 		except sqlite3.OperationalError:
 			# db is there but table does not exist
 			logger.debug('Operational error, init tabels')
-			self._db_init()
+			try:
+				self._db_init()
+			except:
+				self._db_recover()
 		except sqlite3.DatabaseError:
 			self._db_recover()
 
 	def _db_recover(self):
 		assert not self.dbpath == ':memory:'
-		logger.warning('Overwriting possibly corrupt database: %s', self.dbpath)
 		file = LocalFile(self.dbpath)
+		if file.exists():
+			logger.warning('Overwriting possibly corrupt database: %s', self.dbpath)
 		try:
 			file.remove(cleanup=False)
 		except:
@@ -161,8 +172,12 @@ class Index(SignalEmitter):
 	def is_uptodate(self):
 		return self.update_iter.is_uptodate()
 
-	def check_and_update(self):
+	def update(self):
 		'''Update all data in the index'''
+		self.update_iter.update()
+
+	def check_and_update(self):
+		'''Check and update all data in the index'''
 		self.update_iter.check_and_update()
 
 	def check_and_update_iter(self):

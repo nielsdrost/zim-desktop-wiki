@@ -1,15 +1,15 @@
 
-# Copyright 2008 Jaap Karssenberg <jaap.karssenberg@gmail.com>
+# Copyright 2008-2022 Jaap Karssenberg <jaap.karssenberg@gmail.com>
 
 '''This module handles parsing and dumping input in plain text'''
 
 import re
 
-import zim.parser
-from zim.parser import fix_line_end, Rule
+from zim.parse import fix_unicode_whitespace
+from zim.parse.regexparser import Rule, RegexParser
 
 from zim.formats import *
-from zim.parsing import url_re
+from zim.parse.links import old_url_link_re
 
 
 info = {
@@ -34,20 +34,20 @@ class Parser(ParserClass):
 
 	# TODO parse markdown style headers
 
-	def parse(self, input, partial=False):
+	def parse(self, input):
 		if not isinstance(input, str):
 			input = ''.join(input)
 
-		if not partial:
-			input = fix_line_end(input)
+		input = fix_unicode_whitespace(input)
 
-		parser = zim.parser.Parser(
-			Rule(LINK, url_re.r, process=self.parse_url) # FIXME need .r attribute because url_re is a Re object
+		parser = RegexParser(
+			Rule(LINK, old_url_link_re.pattern, process=self.parse_url) # FIXME need .r attribute because url_re is a Re object
 		)
 
-		builder = ParseTreeBuilder(partial=partial)
+		builder = ParseTreeBuilder()
 		builder.start(FORMATTEDTEXT)
-		parser(builder, input)
+		if input:
+			parser(builder, input)
 		builder.end(FORMATTEDTEXT)
 		return builder.get_parsetree()
 
@@ -67,6 +67,7 @@ class Dumper(DumperClass):
 		XCHECKED_BOX: '[x]',
 		CHECKED_BOX: '[*]',
 		MIGRATED_BOX: '[>]',
+		TRANSMIGRATED_BOX: '[<]',
 		BULLET: '*',
 	}
 
@@ -81,6 +82,7 @@ class Dumper(DumperClass):
 		TAG: ('', ''),
 		SUBSCRIPT: ('', ''),
 		SUPERSCRIPT: ('', ''),
+		HEADING: ('', ''),
 	}
 
 	def dump_indent(self, tag, attrib, strings):
@@ -111,8 +113,8 @@ class Dumper(DumperClass):
 			else:
 				char = '-'
 			heading = ''.join(strings)
-			underline = char * len(heading)
-			return [heading + '\n', underline]
+			underline = char * len(heading.strip('\n'))
+			return [heading, underline + '\n']
 		else:
 			# atx-style headers for deeper levels
 			tag = '#' * level
@@ -124,7 +126,7 @@ class Dumper(DumperClass):
 			# top level list with specified indent
 			prefix = '\t' * int(attrib['indent'])
 			return self.prefix_lines(prefix, strings)
-		elif self.context[-1].tag in (BULLETLIST, NUMBEREDLIST):
+		elif self.context[-1].tag == LISTITEM:
 			# indent sub list
 			prefix = '\t'
 			return self.prefix_lines(prefix, strings)
@@ -151,7 +153,7 @@ class Dumper(DumperClass):
 			iter = self.context[-1].attrib.get('_iter')
 			if not iter:
 				# First item on this level
-				iter = self.context[-1].attrib.get('start', 1)
+				iter = self.context[-1].attrib.get('start', '1')
 			bullet = iter + '.'
 			self.context[-1].attrib['_iter'] = increase_list_iter(iter) or '1'
 		else:
@@ -168,7 +170,11 @@ class Dumper(DumperClass):
 				prefix = int(attrib['indent']) * '\t'
 				bullet = prefix + bullet
 
-		return (bullet, ' ') + tuple(strings) + ('\n',)
+		return (bullet, ' ') + tuple(strings)
+
+	def dump_anchor(self, tag, attrib, strings=None):
+		# TODO: what should be returned here?
+		return ("[id: ", attrib['name'], "]")
 
 	def dump_link(self, tag, attrib, strings=None):
 		# Just plain text, either text of link, or link href
@@ -185,10 +191,8 @@ class Dumper(DumperClass):
 		# Just plain text, either alt text or src
 		src = attrib['src']
 		alt = attrib.get('alt')
-		if alt:
-			return alt
-		else:
-			return src
+		text = alt if alt else src
+		return [text]
 
 	def dump_object_fallback(self, tag, attrib, strings):
 		return strings
@@ -224,4 +228,4 @@ class Dumper(DumperClass):
 	dump_th = dump_td
 
 	def dump_line(self, tag, attrib, strings=None):
-		return '-' * 20
+		return ('-' * 20) + '\n'
