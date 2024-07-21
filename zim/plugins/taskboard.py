@@ -1,7 +1,7 @@
 import logging
 from collections import OrderedDict
 
-from zim.plugins.tasklist.gui import ALERT_COLOR
+
 from zim.plugins import PluginClass
 from zim.config import StringAllowEmpty
 
@@ -11,9 +11,7 @@ from zim.gui.mainwindow import MainWindowExtension
 
 from zim.gui.applications import open_url
 from zim.actions import action
-from zim.gui.widgets import RIGHT_PANE, PANE_POSITIONS
-
-from zim.plugins.tasklist.indexer import TasksIndexer, TasksView, _parse_task_labels
+from zim.gui.widgets import RIGHT_PANE
 
 from gi.repository import Gdk
 from gi.repository import Gtk
@@ -24,6 +22,8 @@ from zim.gui.widgets import \
     Dialog, WindowSidePaneWidget, InputEntry, \
     BrowserTreeView, SingleClickTreeView, ScrolledWindow, HPaned, \
     encode_markup_text, decode_markup_text
+
+from zim.plugins.tasklist.indexer import TasksIndexer, AllTasks, _parse_task_labels
 
 # copied from tasklist gui module
 HIGH_COLOR = '#EF5151'  # red (derived from Tango style guide - #EF2929)
@@ -42,13 +42,37 @@ class TaskBoardPlugin(PluginClass):
         'author': 'Niels Drost',
     }
 
-    plugin_notebook_properties = (
+    parser_properties = (
+		# key, type, label, default
+		('all_checkboxes', 'bool', _('Consider all checkboxes as tasks'), True),
+			# T: label for plugin preferences dialog
+		('labels', 'string', _('Labels marking tasks'), 'FIXME, TODO', StringAllowEmpty),
+			# T: label for plugin preferences dialog - labels are e.g. "FIXME", "TODO"
+		('waiting_labels', 'string', _('Labels for "waiting" tasks'), 'Waiting, Planned', StringAllowEmpty),
+			# T: label for plugin preferences dialog - labels are e.g. "Waiting", "Planned"
+		('nonactionable_tags', 'string', _('Tags for "waiting" tasks'), '@waiting, @planned', StringAllowEmpty),
+			# T: label for plugin preferences dialog - tags are e.g. "@waiting", "@planned"
+		('integrate_with_journal', 'choice', _('Use date from journal pages'), 'start', ( # T: label for preference with multiple options
+			('none', _('do not use')),        # T: choice for "Use date from journal pages"
+			('start', _('as start date for tasks')),  # T: choice for "Use date from journal pages"
+			('due', _('as due date for tasks'))       # T: choice for "Use date from journal pages"
+		)),
+		('included_subtrees', 'string', _('Section(s) to index'), '', StringAllowEmpty),
+			# T: Notebook sections to search for tasks - default is the whole tree (empty string means everything)
+		('excluded_subtrees', 'string', _('Section(s) to ignore'), '', StringAllowEmpty),
+			# T: Notebook sections to exclude when searching for tasks - default is none
+	)
+
+    view_properties = (
         ('also_nonactionable_tags', 'string', _(
-            'Tags for non-actionable tasks'), '', StringAllowEmpty),
+            'Tags for non-actionable tasks'), 'Waiting, Planned', StringAllowEmpty),
         ('column_specs', 'string', _(
-            'List of column specificatons'), '', StringAllowEmpty),
+            'List of column specificatons'), 'Inbox,Other', StringAllowEmpty),
 
     )
+
+    plugin_notebook_properties = parser_properties + view_properties
+
 
 
 class TaskBoardPageViewExtension(PageViewExtension):
@@ -57,8 +81,8 @@ class TaskBoardPageViewExtension(PageViewExtension):
     @action(_('_Task Board'), icon='gtk-apply', menuhints='view')
     def open_task_board(self):
         index = self.pageview.notebook.index
-        tasksview = TasksView.new_from_index(index)
         properties = self.plugin.notebook_properties(self.pageview.notebook)
+        tasksview = AllTasks.new_from_index(index)
         dialog = TaskBoardDialog.unique(
             self, self.pageview, tasksview, properties)
         dialog.present()
@@ -118,7 +142,7 @@ class TaskCard(Gtk.Frame):
         textbuffer.insert_with_tags(end_iter,
                                     task['description'], self.bold_tag)
 
-        subtasks = tasksview.list_open_tasks(task)
+        subtasks = tasksview.list_tasks(parent=task)        
 
         for prio, subtask in enumerate(subtasks):
             subtask_render_tags = [self.item_tag]
@@ -205,7 +229,7 @@ class TaskBoardDialog(Dialog):
 
     def create_cards(self):
 
-        tasks = self.tasksview.list_open_tasks()
+        tasks = list(self.tasksview)
 
         for prio, task in enumerate(tasks):
             column = self.select_column(task)
