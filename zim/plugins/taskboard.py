@@ -9,6 +9,12 @@ from zim.gui.pageview import PageViewExtension
 
 from zim.gui.mainwindow import MainWindowExtension
 
+from zim.notebook import NotebookExtension
+
+
+from zim.gui.notebookview import NotebookViewExtension
+from zim.gui.widgets import RIGHT_PANE, PANE_POSITIONS
+
 from zim.gui.applications import open_url
 from zim.actions import action
 from zim.gui.widgets import RIGHT_PANE
@@ -42,51 +48,161 @@ class TaskBoardPlugin(PluginClass):
         'author': 'Niels Drost',
     }
 
-    parser_properties = (
+    plugin_preferences = (
 		# key, type, label, default
-		('all_checkboxes', 'bool', _('Consider all checkboxes as tasks'), True),
-			# T: label for plugin preferences dialog
-		('labels', 'string', _('Labels marking tasks'), 'FIXME, TODO', StringAllowEmpty),
-			# T: label for plugin preferences dialog - labels are e.g. "FIXME", "TODO"
-		('waiting_labels', 'string', _('Labels for "waiting" tasks'), 'Waiting, Planned', StringAllowEmpty),
-			# T: label for plugin preferences dialog - labels are e.g. "Waiting", "Planned"
-		('nonactionable_tags', 'string', _('Tags for "waiting" tasks'), '@waiting, @planned', StringAllowEmpty),
-			# T: label for plugin preferences dialog - tags are e.g. "@waiting", "@planned"
-		('integrate_with_journal', 'choice', _('Use date from journal pages'), 'start', ( # T: label for preference with multiple options
-			('none', _('do not use')),        # T: choice for "Use date from journal pages"
-			('start', _('as start date for tasks')),  # T: choice for "Use date from journal pages"
-			('due', _('as due date for tasks'))       # T: choice for "Use date from journal pages"
-		)),
-		('included_subtrees', 'string', _('Section(s) to index'), '', StringAllowEmpty),
-			# T: Notebook sections to search for tasks - default is the whole tree (empty string means everything)
-		('excluded_subtrees', 'string', _('Section(s) to ignore'), '', StringAllowEmpty),
-			# T: Notebook sections to exclude when searching for tasks - default is none
+		('button_in_headerbar', 'bool', _('Show tasklist button in headerbar'), True),
+			# T: preferences option
+		('show_inbox_next', 'bool', _('Show "GTD-style" inbox & next actions lists'), False),
+			# T: preferences option - "GTD" means "Getting Things Done" methodology
+		('embedded', 'bool', _('Show tasklist in sidepane'), False),
+			# T: preferences option
+		('pane', 'choice', _('Position in the window'), RIGHT_PANE, PANE_POSITIONS),
+			# T: preferences option
+		('show_due_date_in_pane', 'bool', _('Show due date in sidepane'), False),
+			# T: preferences option
+		('show_start_date_in_pane', 'bool', _('Show start date in sidepane'), False),
+			# T: preferences option
+		('show_page_col_in_pane', 'bool', _('Show page column in the sidepane'), False),
+			# T: preferences option
 	)
 
+    # parser_properties = (
+	# 	# key, type, label, default
+	# 	('all_checkboxes', 'bool', _('Consider all checkboxes as tasks'), True),
+	# 		# T: label for plugin preferences dialog
+	# 	('labels', 'string', _('Labels marking tasks'), 'FIXME, TODO', StringAllowEmpty),
+	# 		# T: label for plugin preferences dialog - labels are e.g. "FIXME", "TODO"
+	# 	('waiting_labels', 'string', _('Labels for "waiting" tasks'), 'Waiting, Planned', StringAllowEmpty),
+	# 		# T: label for plugin preferences dialog - labels are e.g. "Waiting", "Planned"
+	# 	('nonactionable_tags', 'string', _('Tags for "waiting" tasks'), '@waiting, @planned', StringAllowEmpty),
+	# 		# T: label for plugin preferences dialog - tags are e.g. "@waiting", "@planned"
+	# 	('integrate_with_journal', 'choice', _('Use date from journal pages'), 'start', ( # T: label for preference with multiple options
+	# 		('none', _('do not use')),        # T: choice for "Use date from journal pages"
+	# 		('start', _('as start date for tasks')),  # T: choice for "Use date from journal pages"
+	# 		('due', _('as due date for tasks'))       # T: choice for "Use date from journal pages"
+	# 	)),
+	# 	('included_subtrees', 'string', _('Section(s) to index'), '', StringAllowEmpty),
+	# 		# T: Notebook sections to search for tasks - default is the whole tree (empty string means everything)
+	# 	('excluded_subtrees', 'string', _('Section(s) to ignore'), '', StringAllowEmpty),
+	# 		# T: Notebook sections to exclude when searching for tasks - default is none
+	# )
+
     view_properties = (
-        ('also_nonactionable_tags', 'string', _(
-            'Tags for non-actionable tasks'), 'Waiting, Planned', StringAllowEmpty),
         ('column_specs', 'string', _(
             'List of column specificatons'), 'Inbox,Other', StringAllowEmpty),
+        ('nonactionable_tags', 'string', _('Tags for "waiting" tasks'), '@waiting, @planned', StringAllowEmpty),
+			# T: label for plugin preferences dialog - tags are e.g. "@waiting", "@planned"
 
     )
 
-    plugin_notebook_properties = parser_properties + view_properties
+    plugin_notebook_properties = view_properties
+
+
+class TaskBoardNotebookExtension(NotebookExtension):
+
+	__signals__ = {
+		'tasklist-changed': (None, None, ()),
+	}
+
+	def __init__(self, plugin, notebook):
+		NotebookExtension.__init__(self, plugin, notebook)
+
+		self.properties = self.plugin.notebook_properties(notebook)
+		# self._parser_key = self._get_parser_key()
+
+		# self.index = notebook.index
+		# if self.index.get_property(TasksIndexer.PLUGIN_NAME) != TasksIndexer.PLUGIN_DB_FORMAT:
+		# 	self.index._db.executescript(TasksIndexer.TEARDOWN_SCRIPT) # XXX
+		# 	self.index.flag_reindex()
+
+		# self.indexer = None
+		# self._setup_indexer(self.index, self.index.update_iter)
+		# self.connectto(self.index, 'new-update-iter', self._setup_indexer)
+
+		# self.connectto(self.properties, 'changed', self.on_properties_changed)
+
+	# def _setup_indexer(self, index, update_iter):
+	# 	if self.indexer is not None:
+	# 		self.disconnect_from(self.indexer)
+	# 		self.indexer.disconnect_all()
+
+	# 	self.indexer = TasksIndexer.new_from_index(index, self.properties)
+	# 	update_iter.add_indexer(self.indexer)
+	# 	self.connectto(self.indexer, 'tasklist-changed')
+
+	# def on_properties_changed(self, properties):
+	# 	# Need to construct new parser, re-index pages
+	# 	if self._parser_key != self._get_parser_key():
+	# 		self._parser_key = self._get_parser_key()
+
+	# 		self.disconnect_from(self.indexer)
+	# 		self.indexer.disconnect_all()
+	# 		self.indexer = TasksIndexer.new_from_index(self.index, properties)
+	# 		self.index.flag_reindex()
+	# 		self.connectto(self.indexer, 'tasklist-changed')
+
+	def on_tasklist_changed(self, indexer):
+		self.emit('tasklist-changed')
+
+	def _get_parser_key(self):
+		return tuple(
+			self.properties[t[0]]
+				for t in self.plugin.parser_properties
+		)
+
+	def teardown(self):
+		# self.indexer.disconnect_all()
+		# self.notebook.index.update_iter.remove_indexer(self.indexer)
+		# self.index._db.executescript(TasksIndexer.TEARDOWN_SCRIPT) # XXX
+		# self.index.set_property(TasksIndexer.PLUGIN_NAME, None)
+		pass
 
 
 
-class TaskBoardPageViewExtension(PageViewExtension):
+class TaskBoardNotebookViewExtension(NotebookViewExtension):
+
+    def __init__(self, plugin, pageview):
+        NotebookViewExtension.__init__(self, plugin, pageview)
+        self._task_board_window = None
+        self._widget = None
+        # self._widget_state = (
+	    # plugin.preferences['show_inbox_next'],
+	    # )
+        # self.on_preferences_changed(plugin.preferences)
+        #self.connectto(plugin.preferences, 'changed', self.on_preferences_changed)
 
     # T: menu item
     @action(_('_Task Board'), icon='gtk-apply', menuhints='view')
     def open_task_board(self):
-        index = self.pageview.notebook.index
-        properties = self.plugin.notebook_properties(self.pageview.notebook)
-        tasksview = AllTasks.new_from_index(index)
-        dialog = TaskBoardDialog.unique(
-            self, self.pageview, tasksview, properties)
-        dialog.present()
 
+    #     if self._task_board_window is None:
+    #         self._task_board_window = self._show_task_window(selection_state=None, hide_on_close=True)
+    #     else:
+    #         self._task_board_window.present()
+
+
+    # def _show_task_window(self, selection_state, hide_on_close=False):
+        notebook = self.pageview.notebook
+        index = self.pageview.notebook.index
+        navigation = self.pageview.navigation
+        properties = self.plugin.notebook_properties(self.pageview.notebook)
+
+        tasksview = AllTasks.new_from_index(index)
+        window = TaskBoardWindow(self.pageview, tasksview, properties)
+        window.show_all()
+
+        return window
+
+        # window = TaskListWindow(notebook, index, navigation, properties, self.plugin.preferences['show_inbox_next'], hide_on_close=True)
+        # window.connect_after('destroy', self._drop_task_list_window_ref)
+        # if selection_state:
+        #     window._set_selection_state(selection_state)
+        # self._connect_tasklist_changed(window)
+        # window.show_all()
+        # return window
+
+
+ 
 
 class TaskCard(Gtk.Frame):
     def __init__(self, prio, task, nonactionable_tags, tasksview, navigation):
@@ -95,6 +211,7 @@ class TaskCard(Gtk.Frame):
         # add a box for content with a small border around the box
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.box.set_border_width(5)
+        #self.box.set_size_request(100,100)
         self.add(self.box)
 
         self.tabs = Pango.TabArray(2, True)
@@ -109,20 +226,24 @@ class TaskCard(Gtk.Frame):
         self.description = task['description']
         self.navigation = navigation
 
-        if task['prio'] is 0:
+        if task['prio'] == 0:
             context.add_class("normal-card")
-        elif task['prio'] is 1:
+        elif task['prio'] == 1:
             context.add_class("alert-card")
-        elif task['prio'] is 2:
+        elif task['prio'] == 2:
             context.add_class("medium-card")
-        elif task['prio'] is 3:
+        elif task['prio'] == 3:
             context.add_class("high-card")
 
         self.textview.set_tabs(self.tabs)
         self.textview.set_editable(False)
-        self.textview.set_wrap_mode(Gtk.WrapMode.WORD)
+        self.textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.textview.set_cursor_visible(False)
         self.textview.connect('button-press-event', self.card_clicked)
+        #self.textview.set_size_request(100,100)
+        #self.textview.set_hexpand(False)
+        #self.textview.set_vexpand(True)
+        
 
         textbuffer = self.textview.get_buffer()
 
@@ -159,13 +280,13 @@ class TaskCard(Gtk.Frame):
                                         "\n\u2022\t", *subtask_render_tags)
 
             if (subtask['prio'] > task['prio']):
-                if subtask['prio'] is 0:
+                if subtask['prio'] == 0:
                     pass
-                elif subtask['prio'] is 1:
+                elif subtask['prio'] == 1:
                     subtask_render_tags.append(self.alert_tag)
-                elif subtask['prio'] is 2:
+                elif subtask['prio'] == 2:
                     subtask_render_tags.append(self.medium_tag)
-                elif subtask['prio'] is 3:
+                elif subtask['prio'] == 3:
                     subtask_render_tags.append(self.high_tag)
 
             textbuffer.insert_with_tags(end_iter,
@@ -187,18 +308,32 @@ class TaskCard(Gtk.Frame):
         return False
 
 
-class TaskBoardDialog(Dialog):
+	# def __init__(self, notebook, index, navigation, properties, show_inbox_next, hide_on_close=True):
+	# 	Gtk.Window.__init__(self)
+	# 	self.uistate = notebook.state[self.__class__.__name__]
+	# 	defaultwindowsize=(550, 400)
+#class TaskBoardDialog(Dialog):
+class TaskBoardWindow(Gtk.Window):
     def __init__(self, parent, tasksview, properties):
-        Dialog.__init__(self, parent, _('Task Board'),  # T: dialog title
-                        buttons=Gtk.ButtonsType.CLOSE, help=':Plugins:Task Board',
-                        defaultwindowsize=(1920, 1080))
+        Gtk.Window.__init__(self)
+
         self.properties = properties
         self.tasksview = tasksview
         self.notebook = parent.notebook
         self.navigation = parent.navigation
+        #self.uistate = self.notebook.state[self.__class__.__name__]
+        self.set_default_size(1500,1000)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        #defaultwindowsize=(1000, 1000)
+
+        # Dialog.__init__(self, parent, _('Task Board'),  # T: dialog title
+        #                 buttons=Gtk.ButtonsType.CLOSE, help=':Plugins:Task Board',
+        #                 defaultwindowsize=(1000, 1000))
+
 
         nonactionable_tags = _parse_task_labels(
-            properties['also_nonactionable_tags'])
+            properties['nonactionable_tags'])
         logger.info("log tags: " + str(nonactionable_tags))
         self.nonactionable_tags = list(
             t.strip('@').lower() for t in nonactionable_tags)
@@ -214,6 +349,9 @@ class TaskBoardDialog(Dialog):
         self._css_provider = self._new_css_provider()
         context.add_provider_for_screen(
             screen, self._css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.vbox = Gtk.VBox()
+        self.add(self.vbox)
 
         # board main gtk box that contains all columns that in turn contain all cards
         self.columnsbox = Gtk.Box(homogeneous=True)
@@ -314,8 +452,8 @@ class TaskBoardDialog(Dialog):
 
         for spec in column_specs:
 
-            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            columnsbox.pack_start(column, True, True, 10)
+            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, )
+            columnsbox.pack_start(column, True, True, 5)
             label = Gtk.Label()
             label.set_markup("<b>" + spec + "</b>")
             column.pack_start(label, False, False, 5)
