@@ -1,6 +1,8 @@
 import logging
 from collections import OrderedDict
 
+import datetime
+import re
 
 from zim.plugins import PluginClass
 from zim.config import StringAllowEmpty
@@ -29,7 +31,7 @@ from zim.gui.widgets import \
     BrowserTreeView, SingleClickTreeView, ScrolledWindow, HPaned, \
     encode_markup_text, decode_markup_text
 
-from zim.plugins.tasklist.indexer import TasksIndexer, AllTasks, _parse_task_labels
+from zim.plugins.tasklist.indexer import TasksIndexer, AllTasks, _parse_task_labels, _date_re, _tag_re
 
 # copied from tasklist gui module
 HIGH_COLOR = '#EF5151'  # red (derived from Tango style guide - #EF2929)
@@ -226,7 +228,24 @@ class TaskCard(Gtk.Frame):
         self.description = task['description']
         self.navigation = navigation
 
-        if task['prio'] == 0:
+        todaystr = str(datetime.date.today())
+
+        #keep track of the earliest due date in the task and subtasks
+        due_date = task['due']
+
+
+        #if the list of tags contains an non-actionable task the task is inactive
+        tags_list = [t for t in task['tags'].split(',') if t]
+        nonactionable = any(
+            t in tags_list for t in nonactionable_tags)
+
+        #if the top level task did not start yet the task is inactive
+        if str(task['start']) > todaystr:
+            nonactionable = True
+
+        if nonactionable:
+            context.add_class("nonactive-card")
+        elif task['prio'] == 0:
             context.add_class("normal-card")
         elif task['prio'] == 1:
             context.add_class("alert-card")
@@ -247,6 +266,7 @@ class TaskCard(Gtk.Frame):
 
         textbuffer = self.textview.get_buffer()
 
+        self.date_tag = textbuffer.create_tag("date", foreground="darkred")
         self.bold_tag = textbuffer.create_tag("bold", weight=Pango.Weight.BOLD)
         self.item_tag = textbuffer.create_tag(
             "item", left_margin=14, indent=-14)
@@ -260,8 +280,12 @@ class TaskCard(Gtk.Frame):
 
         # add card title (parent task)
         end_iter = textbuffer.get_end_iter()
+
+        desc = _date_re.sub('', task['description'])
+        desc = re.sub(r'\s*!+\s*', ' ', desc) # get rid of exclamation marks
+
         textbuffer.insert_with_tags(end_iter,
-                                    task['description'], self.bold_tag)
+                                    desc, self.bold_tag)
 
         subtasks = tasksview.list_tasks(parent=task)        
 
@@ -271,6 +295,10 @@ class TaskCard(Gtk.Frame):
             tags_list = [t for t in subtask['tags'].split(',') if t]
             nonactionable = any(
                 t in tags_list for t in nonactionable_tags)
+            
+            #if the subtask did not start yet the task is inactive
+            if str(subtask['start']) > todaystr:
+                nonactionable = True
 
             if (nonactionable):
                 subtask_render_tags.append(self.non_actionable_tag)
@@ -289,12 +317,28 @@ class TaskCard(Gtk.Frame):
                 elif subtask['prio'] == 3:
                     subtask_render_tags.append(self.high_tag)
 
-            textbuffer.insert_with_tags(end_iter,
-                                        subtask['description'], *subtask_render_tags)
 
+            desc = _date_re.sub('', subtask['description'])
+            desc = re.sub(r'\s*!+\s*', ' ', desc) # get rid of exclamation marks
+
+            textbuffer.insert_with_tags(end_iter,
+                                        desc, *subtask_render_tags)
+            
+            if subtask['due'] != '9999' and (subtask['due'] < due_date or due_date == '9999'):
+                due_date = subtask['due']
+
+        # #insert list of tags
         # end_iter = textbuffer.get_end_iter()
         # textbuffer.insert_with_tags(end_iter,
         #                             "\n" + task['tags'], self.tags_tag)
+
+
+        #insert due date
+        if due_date != '9999':
+            time_delta = datetime.date.fromisoformat(due_date) - datetime.date.today()
+
+            end_iter = textbuffer.get_end_iter()
+            textbuffer.insert_with_tags(end_iter,"\n\n" + due_date + " (" + str(time_delta.days) + " days)", self.date_tag)
 
         self.box.pack_start(self.textview, True, True, 5)
 
@@ -414,6 +458,13 @@ class TaskBoardWindow(Gtk.Window):
 
     def _new_css_provider(self):
         css = '''
+    .nonactive-card textview text {
+        background-color: #E8E8E8;
+    }
+    .nonactive-card {
+        background-color: #E8E8E8;
+    }
+
     .normal-card textview text {
         background-color: #ffffed;
     }
